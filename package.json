@@ -1,0 +1,27 @@
+{
+  "name": "dsh-omo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, read-only role agents, inline task delegation, and a plan-mode write guard.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "prompts/",
+    "skills/",
+    "README.md"
+  ],
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,11 @@
+# Runtime dependencies (the bundle itself has none; the profile links it).
+node_modules/
+
+# Vendored upstream source used only for the fidelity check, never committed.
+.vendor/
+
+# Execution evidence produced by the ulw workflow.
+.dsh/ulw/evidence/
+
+# Local QA scratch workspaces.
+.qa-ws/
