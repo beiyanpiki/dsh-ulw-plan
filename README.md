@@ -72,6 +72,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 5. plan-gate 的「本会话触碰过 plan」简化为「mode=plan 且产物存在」。
 6. 新增 `/ulw-mode`。
 7. guard 不管 `bash`（与 omo 的 prometheus-md-only 一致，否则 `scaffold-plan.mjs` 无法产出文件）。
+8. 模型用 `skill` 工具自行加载 `ulw-plan` 不会切换模式；进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
 
 ## 安装后手工检查清单
 

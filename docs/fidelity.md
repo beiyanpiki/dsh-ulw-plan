@@ -215,6 +215,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
 8. guard 只管 `write` / `edit`，不管 `bash`（与 omo 的 prometheus-md-only 一致）。
 9. `ulw-execute` 正文保留 omo 的 `codex:<session_id>` 原文；A2 的 DSH 兼容节把前缀映射为 `dsh:<session_id>`，并声明「本节优先」。
+10. 模型通过 `skill` 工具自行加载 `ulw-plan` 不会切换模式：投影只折叠用户显式 `/ulw-plan` 的 `skill-invocation` 消息。要进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
 
 ## 8. 重新验证
 

@@ -180,6 +180,31 @@ test('a failed child still returns its diagnostic and is disposed', async () => 
   assert.equal(captured.disposed, true)
 })
 
+test('a failing disposal never replaces a successful result', async () => {
+  const cwd = workspace()
+  const agent = agentAt(cwd, 0)
+  const ctx = {
+    workingDirectory: { get: () => cwd },
+    sessionProjections: { stateOf: () => ({ mode: 'off' }) },
+    subagents: {
+      async startActivation() {
+        return {
+          childId: 'child-session-2',
+          result: Promise.resolve({ output: [{ type: 'text', text: 'kept' }], stopReason: 'completed' }),
+          async dispose() {
+            throw new Error('teardown exploded')
+          },
+        }
+      },
+    },
+  }
+  const value = await createTaskTool(ctx).execute(
+    { description: 'map', prompt: 'list files', subagent_type: 'explore' },
+    { agent, signal: new AbortController().signal },
+  )
+  assert.equal(value.text, 'kept')
+})
+
 test('the tool declares an output contract and stays concurrency-safe', () => {
   const cwd = workspace()
   const { tool } = harness({ cwd })
