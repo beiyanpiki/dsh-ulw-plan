@@ -87,7 +87,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 ```bash
 node --test   # Node 26 discovers test/*.test.mjs; a bare directory argument is rejected
 node --check lib/*.js skills/ulw-plan/scripts/*.mjs
-grep -rn '\.omo' lib skills prompts | wc -l   # 期望 0
+grep -rn '\.omo' skills prompts | wc -l   # 期望 0（lib/load.js 的运行时改名是唯一登记例外）
 ```
 
 `docs/fidelity.md` 记录 11 个移植文件的 sha256、57 处 `.omo → .dsh/ulw` 改名、4 处结构性手改，以及 A1/A2/A3 三段追加。
