@@ -48,7 +48,7 @@ tar xzf omo.tar.gz && mv oh-my-openagent-4c6a902 src && rm omo.tar.gz
 
 A3 是新增文件，不在 11 个「移植」文件里：`skills/ulw-plan/references/dsh-harness.md`（sha256 `e923e6f1ae947db68756100cb37eae4aaf6d870355032f6e5cc104b5908c66e5`）。
 
-## 3. T1：产物根改名（`.omo` → `.dsh/ulw`，57 处 / 6 文件）
+## 3. T1：产物根改名（`.omo` → `.dsh/ulw`，57 处 / 6 个含命中的文件）
 
 | 文件 | 处数 | 处理 |
 | --- | --- | --- |
@@ -214,6 +214,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 6. 新增 `/ulw-mode off|plan|execute` 逃生口（omo 没有）。
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
 8. guard 只管 `write` / `edit`，不管 `bash`（与 omo 的 prometheus-md-only 一致）。
+9. `ulw-execute` 正文保留 omo 的 `codex:<session_id>` 原文；A2 的 DSH 兼容节把前缀映射为 `dsh:<session_id>`，并声明「本节优先」。
 
 ## 8. 重新验证
 

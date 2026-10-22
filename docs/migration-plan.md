@@ -7,7 +7,7 @@
 - 勘察对象 A：`code-yeongyu/oh-my-openagent` @ `4c6a902`（`dev`）
 - 勘察对象 B：本机 DSH **0.2.1-rc.2**，profile `web`，当前预设 `ptc`
 - 目标仓库：`/home/miku/dsh-omo`（空仓库；profile 已有软链 `dsh-omo -> /home/miku/dsh-omo`，尚未进 `dsh.profile.bundles`）
-- 可执行的实施计划（ulw-plan 格式，11 个 todo + F1-F4）：`.dsh/ulw/plans/dsh-omo-plugin.md`
+- 可执行的实施计划（ulw-plan 格式，8 个 todo + F1-F4）：`.dsh/ulw/plans/dsh-omo-plugin.md`
 
 ---
 
