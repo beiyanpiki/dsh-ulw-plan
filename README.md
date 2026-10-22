@@ -85,7 +85,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 ## 开发
 
 ```bash
-node --test test/
+node --test   # Node 26 discovers test/*.test.mjs; a bare directory argument is rejected
 node --check lib/*.js skills/ulw-plan/scripts/*.mjs
 grep -rn '\.omo' lib skills prompts | wc -l   # 期望 0
 ```

@@ -220,7 +220,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 ```bash
 node --check skills/ulw-plan/scripts/scaffold-plan.mjs
 node --check skills/ulw-plan/scripts/plan-templates.mjs
-grep -rn '\.omo' lib skills prompts | wc -l   # 期望 0
+grep -rn '\.omo' skills prompts | wc -l   # 期望 0（lib/load.js 的运行时改名是唯一登记命中）
 sha256sum prompts/*.md skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
   skills/ulw-plan/references/intent-clear.md skills/ulw-plan/references/intent-unclear.md \
   skills/ulw-plan/scripts/plan-templates.mjs skills/ulw-plan/scripts/scaffold-plan.mjs \

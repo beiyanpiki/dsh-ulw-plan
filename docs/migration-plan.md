@@ -422,17 +422,23 @@ dsh --profile web --dump-config | grep -n dsh-omo
 # cordis_inspect_query Config.listConfigs name=dsh-omo → active
 # cordis_inspect_query Tool.listTools → 含 task
 # 单元
-node --test test/
+node --test
 # 改名完整性
-grep -rn '\.omo' lib skills prompts | wc -l          # 期望 0
+grep -rn '\.omo' skills prompts | wc -l            # 期望 0（lib/load.js 的唯一运行时改名除外）
 # 反向 diff（每个文本文件）
-sed 's#\.dsh/ulw#.omo#g' skills/ulw-plan/SKILL.md | diff - /tmp/omo-src/.../SKILL.md
+sed 's#\.dsh/ulw#.omo#g' skills/ulw-plan/SKILL.md | diff - .vendor/omo-pinned/src/.../SKILL.md
 # 行为
 #   /ulw-plan ... → ULW-PLAN MODE ENABLED!；并行 2+ task(subagent_type="explore")
 #   plan 模式写 src/x.ts → 被 guard 拒绝；写 .dsh/ulw/plans/x.md → 放行
 #   /ulw-mode off → 写恢复（command/run 被投影折叠）
 #   /ulw-mode execute → task(subagent_type="plan-reviewer") 被 gate 拒绝
 ```
+
+### 9.1 执行期修订（2026-10-22）
+
+- Node v26.7.0 的 `--test` 不接受目录实参：门禁改为 `node --test`（全量）或 `node --test test/<file>`（单文件）。
+- 本机 `/tmp` 按 shell 隔离：omo 源快照固定在工作区 `.vendor/omo-pinned/src`（commit `4c6a902`），QA 工作区固定为 `.qa-ws/`。
+- `.omo` 计数门禁收窄到 `skills prompts`：`lib/load.js` 必须保留一处运行时改名 `.omo → .dsh/ulw`（Task 7 的要求），因此不能把 `lib` 计入「零命中」。
 
 **通过的定义**：`/ulw-plan` 跑完一轮、产物在 `.dsh/ulw`、guard 双向生效、`plan-reviewer` 对真实 plan 出裁决。
 
