@@ -1,5 +1,8 @@
 # 保真记录（dsh-omo）
 
+
+> 发布名：本文写于项目名为 dsh-omo 的阶段。npm 包与 GitHub 仓库现以 **dsh-ulw-plan** 发布；bundle row id 仍为 `omo`，文中 `dsh-omo` 指同一实现。
+
 > 这份文档回答一个问题：**哪些字节来自 omo，哪些是本地改动？** 每一条都可机械复核，不靠肉眼。
 
 ## 1. 源

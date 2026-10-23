@@ -1,5 +1,8 @@
 # omo → dsh 迁移方案 v2：explore & plan & execute
 
+
+> 发布名：本文写于项目名为 dsh-omo 的阶段。npm 包与 GitHub 仓库现以 **dsh-ulw-plan** 发布；bundle row id 仍为 `omo`，文中 `dsh-omo` 指同一实现。
+
 > 把 omo（oh-my-openagent）的 **explore → plan → execute** 作为**一个 DSH 插件**（`dsh-omo`）迁移到 DeepSeek Harness：
 > 4 个 agent（`explore` / `librarian` / `plan-consultant` / `plan-reviewer`）+ 2 个指令（`/ulw-plan` / `/ulw-execute`），
 > 纪律不靠散文，靠**会话模式投影 + 写入门禁 guard + 严格 plan-gate**硬化。

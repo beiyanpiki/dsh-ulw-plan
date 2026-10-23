@@ -1,4 +1,4 @@
-# dsh-omo bundle patch: one Host row over the profile.
+# dsh-ulw-plan bundle patch: one Host row over the profile.
 #
 # The row loads the package's main entry as a plain Cordis plugin. Everything
 # the plugin contributes (projection, guard, command, tools, skills, presets)
@@ -6,4 +6,4 @@
 # taken over and no per-session composition is needed.
 - insert:
     - id: omo
-      name: dsh-omo
+      name: dsh-ulw-plan

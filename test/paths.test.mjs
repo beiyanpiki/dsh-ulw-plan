@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { artifactPath, artifactRoot, hasUlwArtifact, isUnderArtifactRoot } from '../lib/paths.js'
 
-const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-omo-paths-'))
+const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-ulw-plan-paths-'))
 
 test('the artifact root is .dsh/ulw under the working directory', () => {
   const cwd = workspace()

@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Unit tests
+        run: node --test
+
+      - name: Syntax checks
+        run: |
+          for file in lib/*.js skills/ulw-plan/scripts/*.mjs; do
+            node --check "$file"
+          done
+
+      - name: Artifact-root rename gate
+        run: test "$(grep -rn '\.omo' skills prompts | wc -l)" -eq 0
+
+      - name: Package contents
+        run: npm pack --dry-run

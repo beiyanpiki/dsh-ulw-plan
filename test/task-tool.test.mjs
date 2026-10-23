@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createTaskTool, resolveSubagentType } from '../lib/task-tool.js'
 
-const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-omo-task-'))
+const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-ulw-plan-task-'))
 
 function agentAt(cwd, depth = 0) {
   const session = { header: { cwd, ...(depth === 0 ? {} : { delegationDepth: depth }) } }

@@ -1,7 +1,33 @@
 {
-  "name": "dsh-omo",
+  "name": "dsh-ulw-plan",
   "version": "0.1.0",
   "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, read-only role agents, inline task delegation, and a plan-mode write guard.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "dsh-ulw-plan",
+    "omo",
+    "oh-my-openagent",
+    "ulw-plan",
+    "ulw-execute",
+    "planning",
+    "workflow",
+    "agent-preset",
+    "subagent"
+  ],
+  "author": "beiyanpiki",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beiyanpiki/dsh-ulw-plan.git"
+  },
+  "homepage": "https://github.com/beiyanpiki/dsh-ulw-plan#readme",
+  "bugs": {
+    "url": "https://github.com/beiyanpiki/dsh-ulw-plan/issues"
+  },
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -21,27 +47,14 @@
     "README.md",
     "LICENSE"
   ],
-  "keywords": [
-    "deepseek-harness",
-    "dsh",
-    "dsh-plugin",
-    "dsh-bundle",
-    "cordis",
-    "omo",
-    "oh-my-openagent",
-    "ulw-plan",
-    "ulw-execute",
-    "planning",
-    "workflow",
-    "agent-preset",
-    "subagent"
-  ],
-  "author": "miku",
-  "license": "MIT",
   "icon": "icon.svg",
   "engines": {
     "node": ">=22.19.0",
     "dsh": ">=0.2.0-rc.2"
+  },
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "npm test"
   },
   "dsh": {
     "bundle": {

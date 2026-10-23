@@ -1,4 +1,9 @@
-# dsh-omo
+# dsh-ulw-plan
+
+[![CI](https://github.com/beiyanpiki/dsh-ulw-plan/actions/workflows/ci.yml/badge.svg)](https://github.com/beiyanpiki/dsh-ulw-plan/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-ulw-plan.svg)](https://www.npmjs.com/package/dsh-ulw-plan)
+
+仓库：[beiyanpiki/dsh-ulw-plan](https://github.com/beiyanpiki/dsh-ulw-plan)。内部 bundle row id 仍为 `omo`，历史设计/保真文档里出现的 `dsh-omo` 指同一实现。
 
 omo（[oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)）的 **explore → plan → execute** 工作流，作为 **一个 DeepSeek Harness Host 插件**。
 
@@ -12,16 +17,16 @@ omo（[oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)）的 *
 
 ### 从 npm（分发版）
 
-在 Web GUI 的 Plugins 页安装 `dsh-omo`，或通过 Host 的 `plugin_manager`：
+在 Web GUI 的 Plugins 页安装 `dsh-ulw-plan`，或通过 Host 的 `plugin_manager`：
 
 ```text
-plugin_manager { "action": "install_bundle", "target": "dsh-omo" }
-plugin_manager { "action": "set_bundle", "target": "dsh-omo", "enabled": true }
+plugin_manager { "action": "install_bundle", "target": "dsh-ulw-plan" }
+plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": true }
 ```
 
-也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-omo-0.1.0.tgz`、`github:<owner>/dsh-omo#<ref>` 或（开发时）`/home/miku/dsh-omo`。
+也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-ulw-plan-0.1.0.tgz`、`github:<owner>/dsh-ulw-plan#<ref>` 或（开发时）本仓库的检出目录。
 
-安装后 profile 的 `package.json` 会把 `dsh-omo` 放进 `dsh.profile.bundles`，`cordis.patch.yml` 的 `insert` 行把 `dsh-omo` 挂到 Host 平面。**不要**手改 profile 的 `package.json` / `cordis.patch.yml`，也不要在 profile 目录跑 `pnpm`。
+安装后 profile 的 `package.json` 会把 `dsh-ulw-plan` 放进 `dsh.profile.bundles`，`cordis.patch.yml` 的 `insert` 行把 `dsh-ulw-plan` 挂到 Host 平面。**不要**手改 profile 的 `package.json` / `cordis.patch.yml`，也不要在 profile 目录跑 `pnpm`。
 
 发布到 npm / 上架插件市场 / 升级与私有分发的完整流程见 [`docs/publishing.md`](docs/publishing.md)。
 
@@ -82,8 +87,8 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 
 ## 安装后手工检查清单
 
-1. `dsh --profile web --dump-config | grep dsh-omo` —— 至少一行。
-2. `cordis_inspect_query Config.listConfigs name=dsh-omo` —— 出现该行且为 active。
+1. `dsh --profile web --dump-config | grep dsh-ulw-plan` —— 至少一行。
+2. `cordis_inspect_query Config.listConfigs name=dsh-ulw-plan` —— 出现该行且为 active。
 3. `cordis_inspect_query Tool.listTools` —— 含 `task`。
 4. `skills/list` —— 含 `ulw-plan`、`ulw-execute`，且 `invocation.userInvocable === true`。
 5. `agentPresets.list()` —— 含四个 `omo ` 前缀 preset，均无 `broken` 字段。
@@ -98,3 +103,7 @@ grep -rn '\.omo' skills prompts | wc -l   # 期望 0（lib/load.js 的运行时�
 ```
 
 `docs/fidelity.md` 记录 11 个移植文件的 sha256、57 处 `.omo → .dsh/ulw` 改名、4 处结构性手改，以及 A1/A2/A3 三段追加。
+
+## 发布
+
+`dsh-ulw-plan` 由 GitHub Actions 在 `v*` tag 上自动发布到 npm，并创建 GitHub Release；`NPM_TOKEN` 的配置与手动发布流程见 [`docs/publishing.md`](docs/publishing.md)。
