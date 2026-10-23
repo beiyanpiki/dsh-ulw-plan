@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  stage:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -49,22 +49,11 @@ jobs:
       - name: Test
         run: node --test
 
-      - name: Publish to npm
-        run: npm publish --access public --provenance
+      # 2FA-enabled accounts cannot publish directly from CI with a regular
+      # token. Stage the version instead; a maintainer approves it on npm with
+      # 2FA. Once a Trusted Publisher is configured for this workflow, direct
+      # `npm publish --access public --provenance` becomes possible.
+      - name: Stage on npm
+        run: npm stage publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  github-release:
-    needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

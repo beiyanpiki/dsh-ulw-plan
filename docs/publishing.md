@@ -4,7 +4,7 @@
 
 ## 0. 结论先说
 
-本仓库用 GitHub Actions 在 **版本 tag** 上自动发布到 npm：
+本仓库用 GitHub Actions 在 **版本 tag** 上把包 **stage 到 npm**；因为 npm 账号启用了 2FA，最后由维护者用 2FA 批准上线（npm 的 staged publishing）：
 
 ```bash
 # 第一次发布前：在 GitHub 仓库 Settings → Secrets and variables → Actions 添加 NPM_TOKEN
@@ -12,7 +12,16 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`v0.1.0` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag，然后执行 `npm publish --access public --provenance`，并创建 GitHub Release。
+`v0.1.0` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag、执行 `npm stage publish --access public --provenance`。
+
+然后批准（二选一）：
+
+```bash
+npm stage list dsh-ulw-plan                 # 需要本机已 npm login
+npm stage approve <stage-id> --otp <6位码>  # 或 npmjs.com → 包页面 → Staged versions
+```
+
+批准后版本才真正公开。想要完全无人值守发布，见第 3.1 节的 Trusted Publisher / bypass token 说明。
 
 任何一台 DSH 机器安装：
 
@@ -96,7 +105,7 @@ DSH 的 Plugins 页和插件详情不执行插件代码就会读取：
 
 ## 3. 发布方式
 
-### 3.1 CI 自动发布（本仓库已配置，推荐）
+### 3.1 CI 发布（本仓库已配置）
 
 - workflow：`.github/workflows/release.yml`
 - 触发：push tag `v*`，或在 Actions 页手动 `Run workflow`
@@ -106,7 +115,7 @@ DSH 的 Plugins 页和插件详情不执行插件代码就会读取：
 
 1. 打开 <https://www.npmjs.com/settings/~/tokens>；
 2. **Generate New Token**；
-3. classic 选 **Automation**（最简单），或 granular 给 `dsh-ulw-plan` 的 publish 权限；
+3. classic 选 **Automation** 或 granular 给 `dsh-ulw-plan` 的 publish 权限；
 4. 添加到 GitHub：网页 Settings，或
 
    ```bash
@@ -115,6 +124,15 @@ DSH 的 Plugins 页和插件详情不执行插件代码就会读取：
 
    命令会交互式读取 token；不要把 token 写进仓库或对话。
 
+**为什么是 stage 而不是直接 publish**：npm 对启用 2FA 的账号要求「granular token with bypass 2FA」才能从 CI 直接发布；普通 token 直接 `npm publish` 会得到 403：
+
+```text
+403 Forbidden - PUT https://registry.npmjs.org/<pkg>
+Two-factor authentication or granular access token with bypass 2fa enabled is required
+```
+
+Staged publishing 把 2FA 推迟到批准时，因此普通 token 也能由 CI 上传。
+
 发布：
 
 ```bash
@@ -122,17 +140,32 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-workflow 会校验 tag 与 `package.json.version` 一致、跑 `node --test`、执行 `npm publish --access public --provenance`，成功后创建 GitHub Release。
+workflow 会校验 tag 与 `package.json.version`、跑 `node --test`、执行 `npm stage publish --access public --provenance`。之后：
 
-查看：
+```bash
+npm stage list dsh-ulw-plan
+npm stage approve <stage-id> --otp <你的6位码>
+# 或 npmjs.com → 你的包 → Staged versions → Approve
+```
+
+批准后：
+
+```bash
+npm view dsh-ulw-plan version
+gh release create v0.1.0 --generate-notes --verify-tag
+```
+
+查看/重跑 workflow：
 
 ```bash
 gh run list --workflow release.yml --repo beiyanpiki/dsh-ulw-plan
-npm view dsh-ulw-plan version
+gh workflow run release.yml --repo beiyanpiki/dsh-ulw-plan
 ```
 
-失败重试：在 Actions 页对 `Release` 点 **Re-run**，或
-`gh workflow run release.yml --repo beiyanpiki/dsh-ulw-plan`（手动触发不校验 tag）。
+**想要完全自动发布**（无人工批准）有两种升级路径：
+
+1. 创建一个 **granular access token，勾选 “Bypass two-factor authentication (2FA)”**，把 `NPM_TOKEN` 换成它，并把 workflow 的 `npm stage publish` 改回 `npm publish --access public --provenance`。
+2. 更推荐：包第一次上线后，在 npmjs.com → 包 → Settings → **Trusted publishing** 添加 GitHub 发布者（repo `beiyanpiki/dsh-ulw-plan`，workflow `release.yml`，允许 direct publish），然后删除 `NPM_TOKEN` secret，把 workflow 改回 `npm publish`；npm CLI 会自动使用 GitHub OIDC，不再需要长期 token。
 
 ### 3.2 手动发布（备用）
 
@@ -227,19 +260,12 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 - `repository` / `homepage` / `bugs` → <https://github.com/beiyanpiki/dsh-ulw-plan>
 - `author` → `beiyanpiki`；`LICENSE` → `dsh-ulw-plan contributors`
 - `.github/workflows/ci.yml`：push / PR 跑单元测试、语法检查、改名门禁与 `npm pack --dry-run`
-- `.github/workflows/release.yml`：tag `v*` 发布 npm 并创建 GitHub Release
+- `.github/workflows/release.yml`：tag `v*` 把版本 stage 到 npm（2FA 批准后上线）
 
-仍需你设置：
+仍需你决定：
 
-- **`NPM_TOKEN` repository secret**（第 3.1 节）。这是第一次发布唯一的人工步骤。
+- **每次发布的人工批准**（staged publishing 的 2FA）。如果想完全自动，按第 3.1 节升级为 bypass token 或 Trusted Publisher。
 - 如需改作者署名或许可证持有人，在 `package.json` 与 `LICENSE` 同步修改。
-
-补齐 `NPM_TOKEN` 后，发布就是：
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
 
 ## 10. 已验证的打包结果（2026-10-23）
 

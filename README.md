@@ -106,4 +106,4 @@ grep -rn '\.omo' skills prompts | wc -l   # 期望 0（lib/load.js 的运行时�
 
 ## 发布
 
-`dsh-ulw-plan` 由 GitHub Actions 在 `v*` tag 上自动发布到 npm，并创建 GitHub Release；`NPM_TOKEN` 的配置与手动发布流程见 [`docs/publishing.md`](docs/publishing.md)。
+`dsh-ulw-plan` 由 GitHub Actions 在 `v*` tag 上 stage 到 npm，维护者用 2FA 批准后上线；Trusted Publisher / bypass token 的完全自动发布路径见 [`docs/publishing.md`](docs/publishing.md)。
