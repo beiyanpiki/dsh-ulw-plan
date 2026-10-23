@@ -10,14 +10,20 @@ omo（[oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)）的 *
 
 插件是**零依赖、零构建**的 ESM bundle（`package.json` + `cordis.patch.yml` + `lib/`）。
 
-在 Web GUI 的插件配置里用「安装 bundle」指向本目录，或通过 Host 的 `plugin_manager` 工具：
+### 从 npm（分发版）
+
+在 Web GUI 的 Plugins 页安装 `dsh-omo`，或通过 Host 的 `plugin_manager`：
 
 ```text
-plugin_manager { "action": "install_bundle", "target": "/home/miku/dsh-omo" }
+plugin_manager { "action": "install_bundle", "target": "dsh-omo" }
 plugin_manager { "action": "set_bundle", "target": "dsh-omo", "enabled": true }
 ```
 
+也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-omo-0.1.0.tgz`、`github:<owner>/dsh-omo#<ref>` 或（开发时）`/home/miku/dsh-omo`。
+
 安装后 profile 的 `package.json` 会把 `dsh-omo` 放进 `dsh.profile.bundles`，`cordis.patch.yml` 的 `insert` 行把 `dsh-omo` 挂到 Host 平面。**不要**手改 profile 的 `package.json` / `cordis.patch.yml`，也不要在 profile 目录跑 `pnpm`。
+
+发布到 npm / 上架插件市场 / 升级与私有分发的完整流程见 [`docs/publishing.md`](docs/publishing.md)。
 
 ## 使用
 

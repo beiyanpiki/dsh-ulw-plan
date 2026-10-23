@@ -1,22 +1,46 @@
 {
   "name": "dsh-omo",
   "version": "0.1.0",
-  "private": true,
   "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, read-only role agents, inline task delegation, and a plan-mode write guard.",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/",
     "prompts/",
     "skills/",
+    "locale/",
+    "docs/",
     "cordis.patch.yml",
-    "README.md"
+    "icon.svg",
+    "README.md",
+    "LICENSE"
   ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "omo",
+    "oh-my-openagent",
+    "ulw-plan",
+    "ulw-execute",
+    "planning",
+    "workflow",
+    "agent-preset",
+    "subagent"
+  ],
+  "author": "miku",
+  "license": "MIT",
+  "icon": "icon.svg",
   "engines": {
+    "node": ">=22.19.0",
     "dsh": ">=0.2.0-rc.2"
   },
   "dsh": {
@@ -24,5 +48,7 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "license": "MIT"
+  "publishConfig": {
+    "access": "public"
+  }
 }

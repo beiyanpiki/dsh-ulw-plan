@@ -9,3 +9,9 @@ node_modules/
 
 # Local QA scratch workspaces.
 .qa-ws/
+
+# npm pack output
+*.tgz
+
+# Never commit registry credentials
+.npmrc
