@@ -99,9 +99,9 @@ test('applyTick is idempotent when the row already has the target status', () =>
 })
 
 test('applyTick raises exit 2 for a missing row and leaves the bytes untouched', () => {
-  const plan = '- [ ] 1. one\n'
+  const plan = Buffer.from('- [ ] 1. one\n')
   assert.throws(() => applyTick(plan, '999'), exitCodeIs(2))
-  assert.equal(plan, '- [ ] 1. one\n')
+  assert.equal(plan.toString('utf8'), '- [ ] 1. one\n')
 })
 
 test('applyTick raises exit 3 for a duplicate row id', () => {
