@@ -14,7 +14,9 @@
 **Risk:** Medium - 唯一未被证实的是「插件注册的预设能否解析出厂插件包」；失败则退回补丁声明并多一个重建步骤。
 **Decisions to sanity-check:** ①规划期用硬门禁拦住产品文件写入；②产物放进独立目录，不与现有工具抢项目根；③委派一律内联等待（不实现后台）；④保留一个统一的委派工具，不复用出厂工具；⑤新增一个模式切换指令作为逃生口。
 
-Your next move: 批准后按 Wave 1 → 2 执行；或先对这份计划跑一轮高精度评审（规划评审助手只找 blocker，不挑风格），再决定是否开工。
+> **Status（2026-10-23）：已执行并验证完成。** 8 个 todo 与 F1–F4 全部完成，4 个最终验证器全部 APPROVE。交付：Host bundle `dsh-omo`（已装入 `web` profile）、逐字 prompt/skill、`ulwMode` 投影、4 个只读 preset、内联 `task` + plan-gate、`/ulw-mode`、规划期写入门禁。验证：53 个单测通过、11 个移植文件逐字节保真、headless 真机跑通 `/ulw-plan`、任务委派、plan-gate 双向与 guard 双向。执行期修订与已知限制见 `README.md` 与 `docs/fidelity.md`。
+
+后续使用：从 `/ulw-plan <请求>` 开始，或用 `/ulw-mode off|plan|execute` 切换本会话模式。
 
 ---
 
