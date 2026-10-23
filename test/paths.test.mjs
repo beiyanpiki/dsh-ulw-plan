@@ -1,13 +1,13 @@
 /**
  * Containment tests for the artifact root: relative/absolute paths, `..`
- * escapes, symlinked components, and the artifact-existence probe.
+ * escapes, and symlinked components.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { artifactPath, artifactRoot, hasUlwArtifact, isUnderArtifactRoot } from '../lib/paths.js'
+import { artifactPath, artifactRoot, isUnderArtifactRoot } from '../lib/paths.js'
 
 const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-ulw-plan-paths-'))
 
@@ -55,14 +55,4 @@ test('a symlinked file inside the artifact root is refused', () => {
 test('a missing artifact root is still writable', () => {
   const cwd = workspace()
   assert.equal(isUnderArtifactRoot(cwd, '.dsh/ulw/plans/new.md'), true)
-})
-
-test('artifact detection sees markdown drafts and plans only', () => {
-  const cwd = workspace()
-  assert.equal(hasUlwArtifact(cwd), false)
-  mkdirSync(join(cwd, '.dsh', 'ulw', 'drafts'), { recursive: true })
-  writeFileSync(join(cwd, '.dsh', 'ulw', 'drafts', 'notes.txt'), 'not a draft')
-  assert.equal(hasUlwArtifact(cwd), false)
-  writeFileSync(join(cwd, '.dsh', 'ulw', 'drafts', 'plan.md'), '# draft')
-  assert.equal(hasUlwArtifact(cwd), true)
 })

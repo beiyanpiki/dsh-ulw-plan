@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "omo Workflow",
-    "description": "Explore-first planning and plan-driven execution for DSH: /ulw-plan, /ulw-execute, four read-only role agents, an inline task tool, and a plan-mode write guard."
+    "description": "Explore-first planning and plan-driven execution for DSH: /ulw-plan, /ulw-execute, in-conversation consultant and reviewer commands (/ulw-consult, /ulw-review), native subagent research delegation, and a plan-mode write guard."
   }
 }

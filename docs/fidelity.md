@@ -209,11 +209,13 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 
 ## 7. 已知行为差异
 
-1. `task` **一律内联**：`run_in_background` 被接受但不改变行为（本项目不实现后台投递）。
-2. 没有 `task_output` / `task_send` / `task_cancel`；用 `send_message` / `interrupt_agent` / 结算通知。
+> 以下第 1–5 条为 A4 重构**之前**的历史记录，已被第 9 节的 DSH-native 形态取代，保留作对照；第 6–10 条仍然有效。
+
+1. ~~`task` **一律内联**~~（A4 后 `task` 工具已删除，见第 9 节）。
+2. ~~没有 `task_output` / `task_send` / `task_cancel`~~（A4 后委托走原生 `subagent`，通知与 `send_message` / `interrupt_agent` 均为 Host 自带）。
 3. 没有 continuation hook：`create_goal` 承担；P7 可补 `agent/turn-stopping`。
-4. `category` 不选模型、不传 preset；worker 继承父 preset（完整可写）。
-5. plan-gate 的「本会话触碰过 plan」简化为「`mode = plan` 且 `.dsh/ulw/drafts|plans` 有产物」。
+4. ~~`category` 不选模型、不传 preset~~（A4 后 `category` 连参数都不是，只是 prompt 词汇）。
+5. ~~plan-gate 三条件~~（A4 后由命令校验承担：`/ulw-review` 校验唯一目标，两条角色命令在 `execute` 模式拒绝）。
 6. 新增 `/ulw-mode off|plan|execute` 逃生口（omo 没有）。
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
 8. guard 只管 `write` / `edit`，不管 `bash`（与 omo 的 prometheus-md-only 一致）。
@@ -225,12 +227,59 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 ```bash
 node --check skills/ulw-plan/scripts/scaffold-plan.mjs
 node --check skills/ulw-plan/scripts/plan-templates.mjs
-grep -rn '\.omo' skills prompts | wc -l   # 期望 0（lib/load.js 的运行时改名是唯一登记命中）
-sha256sum prompts/*.md skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
+grep -rn '\.omo' skills | wc -l   # 期望 0（lib/load.js 的运行时改名是唯一登记例外；prompts/ 目录已不存在）
+sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
   skills/ulw-plan/references/intent-clear.md skills/ulw-plan/references/intent-unclear.md \
   skills/ulw-plan/scripts/plan-templates.mjs skills/ulw-plan/scripts/scaffold-plan.mjs \
   skills/ulw-execute/SKILL.md
-# 与第 2 节表格逐行比对
+# 第 2 节表格是 A4 之前的历史基线：只有 scaffold-plan.mjs 仍逐行可比；
+# 其余文件的现行哈希见第 9 节表格
 ```
 
 行为证据见 `.dsh/ulw/evidence/<session>/<goalId>/a<attempt>/task-3-dsh-omo-plugin.log`。
+
+## 9. A4：DSH-native 重构（2026-10-23）
+
+按「更适配 DSH」的目标重构 agent 面：**不再移植 omo 的 agent 机制**。第 2 节的表格从此是历史基线（记录最初端口的字节来源），本节记录现行状态。
+
+### 9.1 删除（本地首创组件，无 omo 对应字节）
+
+| 组件 | 原职责 | 取代者 |
+| --- | --- | --- |
+| `lib/presets.js` | 注册 4 个只读 preset（explore / librarian / plan-consultant / plan-reviewer，`omo ` 前缀） | 角色契约注入（consult/review 命令）+ 研究车道模板（原生 `subagent` 派发） |
+| `lib/task-tool.js` | omo `task` 委托面的内联移植（`subagent_type` + `category` + 深度闸） | Host 原生 `subagent` / `subagent_fork` / `send_message` / `interrupt_agent` |
+| `lib/gate.js` | plan-gate 三条件（mode、产物、唯一 plan 路径） | `/ulw-review` 的目标校验（`lib/commands.js` 的 `resolveReviewTarget`）+ execute 模式拒绝 |
+| `prompts/explore.md`、`prompts/librarian.md` | preset persona | 折叠进 `references/research-lanes.md` 的车道模板（改写：LSP→grep/glob/read，bash broker→web_search/web_fetch，`%%CURRENT_YEAR%%` 令牌改为相对表述） |
+
+### 9.2 移动（字节不变，仅换目录）
+
+| 原路径 | 新路径 | sha256（与第 2 节一致，证明未改字节） |
+| --- | --- | --- |
+| `prompts/plan-consultant.md` | `skills/ulw-plan/references/plan-consultant.md` | `c2d43353bcdde5dc0d5d239d4a35e444e120e3a3d55e09f26127a27188dc1405` |
+| `prompts/plan-reviewer.md` | `skills/ulw-plan/references/plan-reviewer.md` | `0192c47a9f94bc198a479614bd5316bb516f57b4bfa5e3b3e9891abcd66e10db` |
+
+移入技能 references 后，契约成为技能可引用的单源：plan 工作流就地采纳（`references/plan-consultant.md` / `references/plan-reviewer.md`），`/ulw-consult` / `/ulw-review` 命令注入同一文件文本。
+
+### 9.3 新增
+
+- `lib/commands.js` 的 `/ulw-consult <request>` 与 `/ulw-review <plan-path>`：校验后通过 `agent.followup` 把契约文本注入当前会话（与 Host `/goal` 同一座桥；消息构造为 `{role:'user', source:{kind:'user'}}`，不依赖 `@deepseek-ai/dsh-llm`）。`/ulw-review` 同时注入字面绝对路径与命令时刻的 sha256。
+- `skills/ulw-plan/references/research-lanes.md`（sha256 `dd352b75057ad6951d595d0718127ca0965224335f55d407a8780dda00cff216`）：explorer / librarian 车道模板 + 原生 `subagent` 派发纪律。
+
+### 9.4 改写（omo 字节 + 结构性手改）
+
+| 文件 | 现行 sha256 | 改动性质 |
+| --- | --- | --- |
+| `skills/ulw-plan/SKILL.md` | `8138d3e6b1cbdf4b69b4bff018bf6e2f1e04087d0e2952a83ebba0bdc1ee92d8` | A1 的三行 DSH 注记替换为「Delegation (DSH-native)」节；评审修饰段改为会话内评审表述 |
+| `skills/ulw-plan/references/full-workflow.md` | `5c9bc3a1f426e45f0b0dc50e1747c3bd1e0a482a384ff84bf2ee0df296aa9164` | 双车道（momus+oracle）评审契约改写为单车道会话内评审步骤；跨代理 receipt/lifecycle/intake JSON 契约替换为草稿内轮次台账；有界收敛契约保留；Phase 3 的 Metis 步骤改为会话内 consultant 步骤；委托纪律改为原生 `subagent` 措辞 |
+| `skills/ulw-plan/references/intent-clear.md` | `a5ebf52f9e0003fa7a4c548608d24581c3d8f888e7fa7df7b5ac33cc87e812ed` | 「run mandatory Metis / dual review」改为会话内 consultant 步骤与评审步骤（含 `/ulw-review` 提示） |
+| `skills/ulw-plan/references/intent-unclear.md` | `76dd5622626930b05ed1b27f646a9e9161bac93505330fb5baa1f65a1d05f283` | 同上；TRIVIAL-TIER GUARD 的 Momus/Metis 措辞改为 review step / consultant pass |
+| `skills/ulw-plan/scripts/plan-templates.mjs` | `94efd31eb0d01135b203b904eac51849492350d202bee16bf1418067bcbb92b7` | draft 的 review 状态从 momus/independent 双车道改为单车道（status/target/round_id/plan_sha256/rounds） |
+| `skills/ulw-plan/references/dsh-harness.md` | `c6cde9a719d3aa00841534ae3413084fc9c2a33d5551b6e40819f4a3095dfc48` | 整体重写（A3 原文的 DSH-native 版）：原生工具映射、两条角色命令、tier 词汇化、guard 不拦委托 |
+| `skills/ulw-execute/SKILL.md` | `f15863e81e2818cfb99b2939157217f6c06a9c5046e5714862c7fc03f5a42508` | A2 的 DSH 兼容表改写为原生 `subagent` + `/ulw-review`；delegation router 的 `task(category=…)` 示例改为 tier 进 prompt 的说明 |
+
+### 9.5 语义要点
+
+1. **high-accuracy 评审并入 plan 步骤**：评审是规划会话内的工作流步骤（同一契约、单车道、有界收敛、草稿内轮次收据 + 交付前活体摘要复验），不再派生 momus/oracle 子代理；`/ulw-review` 是用户按需触发同一契约的会话内命令。
+2. **explore / librarian 集成而非独立 agent**：研究车道是提示词模板，经 Host 原生 `subagent` / `subagent_fork` 派发；规划会话自身的 read / glob / grep / web 工具也始终可用。
+3. **consultant / reviewer 只以命令提供**：`/ulw-consult`、`/ulw-review` 在对话中直接调用（`execute` 模式拒绝，命令文本给出退出口）；plan 工作流内部则直接采纳 references 里的同一契约，不经命令。
+4. **评审独立性换形**：双 fresh-preset 子代理的独立性由「契约驱动 + 磁盘重读 + 摘要锚定 + 有界收敛」承担——这是与 omo 的真实行为差异，不是缺陷隐瞒。
