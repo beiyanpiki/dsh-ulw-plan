@@ -26,7 +26,7 @@ jobs:
 
       - name: Syntax checks
         run: |
-          for file in lib/*.js skills/ulw-plan/scripts/*.mjs; do
+          for file in lib/*.js skills/*/scripts/*.mjs; do
             node --check "$file"
           done
 
