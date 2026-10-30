@@ -872,6 +872,45 @@ test('execute mode: the three gate tools stay usable while a product write is re
   await host.unload()
 })
 
+test('execute mode: the slash round is accepted before a lease and refused with HANDOFF_ACTIVE_EXECUTE inside one', async (t) => {
+  // State 1: execute with no lease yet -> the real router accepts one round.
+  const beforeLease = createHost({ mode: 'execute' })
+  await apply(beforeLease.ctx, rawConfig())
+  await flush()
+  const receipt = await beforeLease.runCommand('ulw-review', target)
+  assert.equal(receipt.kind, 'success')
+  assert.match(receipt.text, /accepted round round-/)
+  assert.match(receipt.text, /NOT a completed review/)
+  assert.equal(beforeLease.startCalls, 2)
+  assert.equal(beforeLease.followups.length, 1)
+  const followup = beforeLease.followups[0].content[0].text
+  assert.match(followup, /ACCEPTED but NOT completed/)
+  assert.match(followup, /not a new user approval/)
+
+  // State 2: an active required lease -> stable refusal, no round, no followup.
+  const leased = createHost({ mode: 'execute' })
+  await apply(leased.ctx, rawConfig())
+  await flush()
+  const approved = await approveRound(leased)
+  assert.equal(approved.approved, true)
+  const checked = await leased.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.lease.required, true)
+  const startsBefore = leased.startCalls
+  const followupsBefore = leased.followups.length
+  const refused = await leased.runCommand('ulw-review', target)
+  assert.equal(refused.kind, 'error')
+  assert.match(refused.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(refused.text.includes('CAPABILITY_UNAVAILABLE'), false, 'the lease refusal is not a capability diagnostic')
+  assert.equal(/accepted round|NOT a completed review/.test(refused.text), false, 'a refusal never fabricates a receipt')
+  assert.equal(leased.startCalls, startsBefore, 'a refused command starts no activation')
+  assert.equal(leased.followups.length, followupsBefore, 'a refused command injects no followup')
+  t.diagnostic('slash review in execute: preLease=accepted-round postLease=HANDOFF_ACTIVE_EXECUTE starts=' + startsBefore + ' followups=' + followupsBefore)
+
+  await beforeLease.unload()
+  await leased.unload()
+})
+
 test('assembled required flow: two-lane approval leases execution, a tick keeps it, an instruction edit revokes it', async () => {
   const host = createHost({ mode: 'execute' })
   await apply(host.ctx, rawConfig())
