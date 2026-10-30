@@ -6,11 +6,11 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { createReviewArtifact } from '../lib/review-artifact.js'
+import { createReviewArtifact, revalidateReviewArtifact } from '../lib/review-artifact.js'
 import { CANONICAL_PLAN_SLUG_RE, ERROR_CODES, PLAN_LINT_CODES, isCanonicalPlanSlug, lintPlan, parsePlanDocument, planSlugFromPath } from '../lib/review-lint.js'
 import { parseReviewRequest } from '../lib/review-protocol.js'
 import { computeInstructionSha256 } from '../lib/review-artifact.js'
-import { parseRows } from '../skills/ulw-execute/scripts/plan-state.mjs'
+import { applyTick, parseRows } from '../skills/ulw-execute/scripts/plan-state.mjs'
 
 const CLI = fileURLToPath(new URL('../skills/ulw-plan/scripts/plan-lint.mjs', import.meta.url))
 const SCAFFOLD = fileURLToPath(new URL('../skills/ulw-plan/scripts/scaffold-plan.mjs', import.meta.url))
@@ -579,4 +579,172 @@ test('a FIFO source still refuses with an explicit workspace and never blocks', 
   assert.equal(result.status, 5)
   assert.ok(Date.now() - started < 3000)
   assert.match(result.stderr, /regular file/)
+})
+
+// --- Row 25: the instruction scan treats an HTML block as prose, while plan-state
+// and lint still honor the canonical heading or row inside it. Lint must therefore
+// fail closed on those markers: a legal plan-state tick would otherwise change
+// computeInstructionSha256 and instruction-mode revalidation would report stale.
+
+const HTML_ROW = [
+  '- [ ] 1. task inside an HTML block',
+  '  Recommended task executor category: quick — mechanical',
+  '  What to do / Must NOT do: keep every byte.',
+  '  References: ' + code('$E/x.txt'),
+  '  Acceptance criteria: lint stays valid.',
+  '  QA scenarios: one legal tick.',
+  '  Commit: Y | test(plan): x',
+]
+const HTML_FINAL_ROW = [
+  '- [ ] F1. final audit inside an HTML block',
+  '  Recommended task executor category: unspecified-high — audit',
+  '  What to do / Must NOT do: audit.',
+  '  Acceptance criteria: lint stays valid.',
+  '  QA scenarios: audit tick.',
+  '  Commit: Y | test(plan): x',
+]
+const TASK_TAIL = ['## Final verification wave', '']
+const ROW_IN_DIV = ['## Todos', '<div>', ...HTML_ROW, '</div>', ...TASK_TAIL]
+
+// Line arrays keep every expected diagnostic line exact.
+const HTML_DIVERGENT = [
+  ['task row wrapped in a div', ROW_IN_DIV, [['TASK_ROW_HTML_BLOCK', 3]]],
+  ['section heading wrapped in a div', ['<div>', '## Todos', '</div>', ...HTML_ROW, ...TASK_TAIL], [['SECTION_HTML_BLOCK', 2]]],
+  ['final heading wrapped in a div', ['## Todos', ...HTML_ROW, '<div>', '## Final verification wave', '</div>', ...HTML_FINAL_ROW, ''], [['SECTION_HTML_BLOCK', 10]]],
+  ['task row in a details block', ['## Todos', '<details>', ...HTML_ROW, '</details>', ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 3]]],
+  ['uppercase tag with an attribute', ['## Todos', '<DIV class="x">', ...HTML_ROW, '</DIV>', ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 3]]],
+  ['space-indented tag', ['## Todos', '  <div>', ...HTML_ROW, '  </div>', ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 3]]],
+  ['nested tags on one line', ['## Todos', '<div><div>', ...HTML_ROW, '</div></div>', ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 3]]],
+  ['unclosed block', ['## Todos', '<div>', ...HTML_ROW, '## Final verification wave', ''], [['TASK_ROW_HTML_BLOCK', 3], ['SECTION_HTML_BLOCK', 10]]],
+  ['block opened inside frontmatter', ['---', '<div>', '---', '## Todos', ...HTML_ROW, '</div>', ...TASK_TAIL], [['SECTION_HTML_BLOCK', 4], ['TASK_ROW_HTML_BLOCK', 5]]],
+  ['block opened after a comment closes', ['## Todos', '<!--', '--><div>', ...HTML_ROW, '</div>', ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 4]]],
+  ['canonical heading hidden without any row', ['## Todos', ...HTML_ROW, '<div>', '## Final verification wave', '</div>', ''], [['SECTION_HTML_BLOCK', 10]]],
+  ['close tag masked by an HTML comment', ['## Todos', '<div>', '<!--', '</div>', '-->', ...HTML_ROW, ...TASK_TAIL], [['TASK_ROW_HTML_BLOCK', 6]]],
+]
+
+// Ordinary prose HTML, and HTML-shaped text the instruction scan does not treat as
+// a block, must all stay legal.
+const HTML_LEGAL = [
+  ['prose block after the rows', ['## Todos', ...HTML_ROW, '<div>', 'ordinary prose only', '</div>', ...TASK_TAIL]],
+  ['self-closing tag', ['## Todos', '<div/>', ...HTML_ROW, ...TASK_TAIL]],
+  ['open and close on one line', ['## Todos', '<div></div>', ...HTML_ROW, ...TASK_TAIL]],
+  ['void tag', ['## Todos', '<img src="x">', ...HTML_ROW, ...TASK_TAIL]],
+  ['four-space indented tag', ['## Todos', '    <div>', ...HTML_ROW, ...TASK_TAIL]],
+  ['tag inside a comment', ['## Todos', '<!-- <div> -->', ...HTML_ROW, ...TASK_TAIL]],
+  ['fenced html sample', ['## Todos', FENCE + 'html', '<div>', FENCE, ...HTML_ROW, ...TASK_TAIL]],
+  ['block closed before the row', ['## Todos', '<div>', 'prose', '</div>', ...HTML_ROW, ...TASK_TAIL]],
+  ['non-canonical heading inside a block', ['## Todos', ...HTML_ROW, '<div>', '## Notes', '</div>', ...TASK_TAIL]],
+  ['block opened and closed inside frontmatter', ['---', '<div>', '</div>', '---', '## Todos', ...HTML_ROW, ...TASK_TAIL]],
+]
+
+test('canonical sections and task rows inside HTML blocks are structural errors', () => {
+  for (const [name, lines, expected] of HTML_DIVERGENT) {
+    for (const eol of ['\n', '\r\n']) {
+      const content = lines.join(eol)
+      const result = lintPlan({ content })
+      assert.equal(result.valid, false, name + ' ' + JSON.stringify(eol))
+      for (const [expectedCode, expectedLine] of expected) {
+        const diagnostic = at(result, expectedCode, expectedLine)
+        assert.ok(diagnostic, name + ' expected ' + expectedCode + ' at line ' + expectedLine + ': ' + JSON.stringify(result.diagnostics))
+        assert.equal(diagnostic.severity, 'error', name)
+        assert.ok(ERROR_CODES.includes(expectedCode), expectedCode)
+        assert.ok(PLAN_LINT_CODES.includes(expectedCode), expectedCode)
+      }
+      assert.deepEqual(lintPlan({ content }), result, name + ' is deterministic')
+    }
+  }
+})
+
+test('ordinary prose HTML and HTML-shaped text outside a block stay legal', () => {
+  for (const [name, lines] of HTML_LEGAL) {
+    for (const eol of ['\n', '\r\n']) {
+      const content = lines.join(eol)
+      const result = lintPlan({ content })
+      assert.equal(result.valid, true, name + ' ' + JSON.stringify(eol) + ': ' + JSON.stringify(result.diagnostics))
+      assert.deepEqual(result.diagnostics.filter(diagnostic => diagnostic.code === 'SECTION_HTML_BLOCK' || diagnostic.code === 'TASK_ROW_HTML_BLOCK'), [], name)
+    }
+  }
+})
+
+test('the refused HTML-wrapped markers are exactly those whose legal tick changes instruction identity', () => {
+  const content = ROW_IN_DIV.join('\n')
+  assert.equal(lintPlan({ content }).valid, false)
+  const ticked = applyTick(content, '1', 'x')
+  assert.equal(ticked.changed, true)
+  assert.notEqual(computeInstructionSha256(ticked.content), computeInstructionSha256(content))
+  assert.notEqual(hash(ticked.content), hash(content))
+  // A hidden canonical heading also has a legal tick behind it: the F1 row after the
+  // block is selected by plan-state under the hidden Final wave, but the instruction
+  // scan still believes it is inside "## Todos" and does not normalize the status byte.
+  const hiddenFinal = ['## Todos', ...HTML_ROW, '<div>', '## Final verification wave', '</div>', ...HTML_FINAL_ROW, ''].join('\n')
+  assert.ok(at(lintPlan({ content: hiddenFinal }), 'SECTION_HTML_BLOCK', 10))
+  const finalTick = applyTick(hiddenFinal, 'F1', 'x')
+  assert.equal(finalTick.changed, true)
+  assert.notEqual(computeInstructionSha256(finalTick.content), computeInstructionSha256(hiddenFinal))
+})
+
+test('no lint-valid plan lets a legal tick change instruction identity or leave raw identity unchanged', () => {
+  const generated = []
+  for (const tag of ['div', 'details', 'section', 'pre', 'blockquote', 'table', 'custom-tag']) {
+    for (const indent of ['', ' ', '  ', '   ']) {
+      generated.push(['## Todos', indent + '<' + tag + ' class="x">', ...HTML_ROW, indent + '</' + tag + '>', ...TASK_TAIL])
+    }
+    for (const indent of ['    ', '     ']) {
+      generated.push(['## Todos', indent + '<' + tag + '>', ...HTML_ROW, indent + '</' + tag + '>', ...TASK_TAIL])
+    }
+  }
+  let checks = 0
+  for (const [, lines] of [...HTML_DIVERGENT, ...HTML_LEGAL, generated]) {
+    for (const eol of ['\n', '\r\n']) {
+      const content = lines.join(eol)
+      if (!lintPlan({ content }).valid) continue
+      const rows = parseRows(content)
+      assert.ok(rows.length > 0, 'a lint-valid fixture still has executable rows')
+      for (const row of rows) {
+        for (const status of ['x', '~']) {
+          const ticked = applyTick(content, row.id, status)
+          const label = row.id + ' -> ' + status
+          assert.equal(ticked.changed, true, label)
+          assert.equal(computeInstructionSha256(ticked.content), computeInstructionSha256(content), label + ' must not change instruction identity')
+          assert.notEqual(hash(ticked.content), hash(content), label + ' must still change the raw identity')
+          checks += 1
+        }
+      }
+    }
+  }
+  assert.ok(checks >= 40, 'the invariant covered ' + checks + ' legal ticks')
+})
+
+test('the HTML-block refusal is a stable CLI exit 2 while prose HTML stays exit 0', async t => {
+  const fixture = await workspace(t, { content: ROW_IN_DIV.join('\n') })
+  for (const eol of ['\n', '\r\n']) {
+    const content = ROW_IN_DIV.join(eol)
+    await fs.writeFile(fixture.path, content)
+    const text = run([fixture.target], fixture.root)
+    assert.equal(text.status, 2, text.stderr)
+    assert.match(text.stdout, /error line 3 TASK_ROW_HTML_BLOCK/)
+    assert.match(text.stdout, /valid=no/)
+    const json = run([fixture.target, '--json'], fixture.root)
+    assert.equal(json.status, 2)
+    const payload = JSON.parse(json.stdout)
+    assert.equal(payload.valid, false)
+    assert.equal(payload.sha256, hash(content))
+    assert.deepEqual(payload.diagnostics.filter(diagnostic => diagnostic.code === 'TASK_ROW_HTML_BLOCK').map(diagnostic => diagnostic.line), [3])
+  }
+  await fs.writeFile(fixture.path, HTML_LEGAL[0][1].join('\n'))
+  const ok = run([fixture.target], fixture.root)
+  assert.equal(ok.status, 0, ok.stderr)
+  assert.match(ok.stdout, /valid=yes/)
+})
+
+test('instruction-mode revalidation would go stale on the tick lint now refuses', async t => {
+  const content = ROW_IN_DIV.join('\n')
+  const fixture = await workspace(t, { content })
+  assert.equal(lintPlan({ content }).valid, false)
+  const artifact = await createReviewArtifact({ workspace: fixture.root, target: fixture.target })
+  const ticked = applyTick(content, '1', 'x').content
+  await fs.writeFile(fixture.path, ticked)
+  const revalidated = await revalidateReviewArtifact(artifact, { mode: 'instruction' })
+  assert.equal(revalidated.valid, false)
+  assert.equal(revalidated.stale, true)
 })
