@@ -1,9 +1,10 @@
 # dsh-ulw-plan bundle patch: one Host row over the profile.
 #
 # The row loads the package's main entry as a plain Cordis plugin. Everything
-# the plugin contributes (projection, guard, command, tools, skills, presets)
-# is registered on the Host plane from `lib/index.js`, so no shipped preset is
-# taken over and no per-session composition is needed.
+# the plugin contributes (projection, guard, the three /ulw-* commands,
+# skills) is registered on the Host plane from `lib/index.js`; research and
+# worker delegation ride the Host's own subagent tools, so no presets and no
+# per-session composition are needed.
 - insert:
     - id: omo
       name: dsh-ulw-plan

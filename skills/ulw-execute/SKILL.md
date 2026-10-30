@@ -34,13 +34,13 @@ Plan and reviewer agents may run for a long time: spawn them in the background a
 
 ## DeepSeek Harness Tool Compatibility
 
-Translate any Codex-only tool name in an inherited example to its DeepSeek Harness equivalent. **This section wins** over the Codex sections above when both apply.
+Translate any Codex-only tool name in an inherited example to its DeepSeek Harness equivalent. **This section wins** over the Codex sections above when both apply. DSH ships no omo role agents and no category parameter: every delegation goes through the Host's native subagent tools, and the category tier is stated inside the child's prompt.
 
 | Codex example | DSH tool to use |
 | --- | --- |
-| `multi_agent_v1.spawn_agent({"message":"TASK: act as a rigorous reviewer. ..."})` | `task({subagent_type: "plan-reviewer", description, prompt})` — the result returns inline in this same turn |
-| worker `multi_agent_v1.spawn_agent({"message":"TASK: act as <role>. ..."})` | `task({category: "<quick|unspecified-low|unspecified-high|visual-engineering|writing|git|deep-low|deep-high|ultrabrain|architect>", description, prompt})` — allowed outside plan mode only, and it inherits the parent preset |
-| `background_output(task_id="...")` / `multi_agent_v1.wait_agent(...)` | `task` has already waited for the child; its result is the deliverable. Use `subagent` only for non-omo delegation, and there is no `task_output` / `task_send` / `task_cancel` |
+| final-review `task(...)` / reviewer `spawn_agent` | `/ulw-review <plan-path>` injects the reviewer contract into this conversation; or run the reviewer contract from `references/plan-reviewer.md` in the ulw-plan skill inline |
+| worker `multi_agent_v1.spawn_agent({"message":"TASK: act as <role>. ..."})` | `subagent({description, prompt})` — the native tool; put the role AND the `Recommended task executor category:` tier into the prompt text (e.g. "You are a quick-tier worker: mechanical, single-file"). `subagent_fork` only when the child truly needs this session's context |
+| `multi_agent_v1.wait_agent(...)` / `background_output(task_id=…)` | not needed: the native tools notify you in-session when a child finishes; between notifications keep working or end the turn - never poll |
 | `multi_agent_v1.send_input(...)` | `send_message(agent_id, message)` |
 | `multi_agent_v1.close_agent(...)` | `interrupt_agent(agent_id)` |
 | `codex:<session_id>` in `.dsh/ulw/boulder.json` | `dsh:<session_id>` |
@@ -149,7 +149,7 @@ A spawned worker is not fire-and-forget. For EACH subagent in the burst, name th
 
 ### Delegation router — recommended task executor category
 
-When the plan annotates a todo with `Recommended task executor category:`, follow that annotation; deviate only for a reason recorded in the ledger entry. Otherwise route by shape, in the omo category vocabulary (category-capable harnesses pass it directly on the worker-spawn tool, e.g. `task(category="quick", ...)`; others map the parenthesized difficulty):
+When the plan annotates a todo with `Recommended task executor category:`, follow that annotation; deviate only for a reason recorded in the ledger entry. Otherwise route by shape, in the omo category vocabulary (category-capable harnesses pass it directly on the worker-spawn tool; on DSH there is no category parameter - map the tier into the native `subagent` prompt, and other harnesses map the parenthesized difficulty):
 
 | Category | Route here |
 | --- | --- |

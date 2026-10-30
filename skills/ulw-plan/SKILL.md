@@ -34,7 +34,7 @@ Example opening (adapt the wording, keep every commitment):
 
 ## INTENT ROUTING - pick ONE intent reference
 
-**Review modifiers are a gate trigger, not a style cue.** If the user says "high accuracy", "ultra high accuracy", "고정밀", "deep review", or equivalent - in ANY turn, even appended to a follow-up question and even after the plan already exists - set `review_required: true` in the draft: the dual high-accuracy review (native `momus` + the independent Oracle review) is now REQUIRED before handoff, and if the plan already exists you run it this same turn. The review runs under the bounded convergence contract in `full-workflow.md`: convergence-bounded rounds (another round only while the previous one raised a new blocker-eligible finding or closed a ledger blocker; a round with neither that still does not approve stops the review), evidence-backed blocker eligibility, and approval-with-notes counting as approval. Answering the current question more carefully does NOT satisfy it. This does NOT choose CLEAR/UNCLEAR and does NOT suppress interview.
+**Review modifiers are a gate trigger, not a style cue.** If the user says "high accuracy", "ultra high accuracy", "고정밀", "deep review", or equivalent - in ANY turn, even appended to a follow-up question and even after the plan already exists - set `review_required: true` in the draft: the high-accuracy review step (the in-conversation plan review under `references/plan-reviewer.md`, the same contract `/ulw-review` injects) is now REQUIRED before handoff, and if the plan already exists you run it this same turn. The review runs under the bounded convergence contract in `full-workflow.md`: convergence-bounded rounds (another round only while the previous one raised a new blocker-eligible finding or closed a ledger blocker; a round with neither that still does not approve stops the review), evidence-backed blocker eligibility, and approval-with-notes counting as approval. Answering the current question more carefully does NOT satisfy it. This does NOT choose CLEAR/UNCLEAR and does NOT suppress interview.
 
 After grounding, make ONE judgment, record `intent: clear|unclear` plus `review_required`, **ANNOUNCE both to the user in one line**, then load ONE intent reference (you ALSO read `references/full-workflow.md` for the shared mechanics - see below). The test keys on whether the desired **OUTCOME** is clear, NOT on request length. This verdict line and the opening announcement above are the two mandatory user-visible signals of a planning session - it tells the user whether they will be interviewed and whether high-accuracy review is already requested; never skip either.
 
@@ -82,19 +82,19 @@ When producing the plan, encode every executable item as a column-zero Markdown 
 
 When exploration is exhausted and the unknowns are answered, record the gate in the draft (`status: awaiting-approval`, approach, and the next workflow action), present a short brief once, then **wait for the user's explicit okay**. Approval authorizes plan creation only; any already-required review runs afterward under its existing authorization. Full mechanics: `references/full-workflow.md`.
 
-## Delegation (OpenCode-native)
+## Delegation (DSH-native)
 
-Fan out read-only research before deciding. Every delegated prompt names TASK / DELIVERABLE / SCOPE / VERIFY, states the role inside the prompt, and includes only the context the child needs:
+Fan out read-only research before deciding. DSH has no omo role agents: research lanes are prompt templates dispatched through the Host's native `subagent` tool (or `subagent_fork` when a lane genuinely needs this session's built context), and the planning roles run inline in this conversation. Every delegated prompt names TASK / DELIVERABLE / SCOPE / VERIFY, states the role inside the prompt, and includes only the context the child needs:
 
 ```
-task(subagent_type="explore", description="Map the implementation surface", prompt="TASK: act as an explorer. DELIVERABLE: ... SCOPE: ... VERIFY: ...")
+subagent({ description: "Map the implementation surface", prompt: "TASK: <explorer lane template from references/research-lanes.md>. DELIVERABLE: ... SCOPE: ... VERIFY: ..." })
 ```
 
-Roles - the ONLY subagents you may spawn (all read-only, plus `oracle` for the high-accuracy review): `explore` (internal patterns/conventions/tests), `librarian` (external docs/contracts), `metis` (gap analysis), `momus` (high-accuracy plan review). Never dispatch with `category=` - categories spawn implementers - and never instruct a child to edit files. Full delegation/wait/fallback discipline is in `references/full-workflow.md`.
-
-DSH: delegate with the inline `task` tool — `task({subagent_type: "explore"|"librarian"|"plan-consultant"|"plan-reviewer"|"metis"|"momus"|"oracle", description, prompt})` returns the child's result in this same turn.
-DSH: `category=` is refused in plan mode (it spawns an implementer); use it only after `/ulw-execute`.
-DSH: the exact tool mapping, the three aliases, and the plan-mode write guard live in `references/dsh-harness.md`.
+- **Research lanes** - paste the **explorer** (internal patterns/conventions/tests) or **librarian** (external docs/contracts) template from `references/research-lanes.md` into the subagent prompt; instruct every lane to stay read-only. Subagent outputs are CLAIMS until you independently verify them.
+- **Consultant gap analysis** (mandatory during plan generation) - run it inline: adopt the consultant contract in `references/plan-consultant.md`, the same contract the `/ulw-consult` command injects, and apply it to the draft.
+- **Plan review** (the high-accuracy review step) - run it inline: adopt the reviewer contract in `references/plan-reviewer.md`, the same contract the `/ulw-review` command injects; the review step and its convergence contract are in `references/full-workflow.md`.
+- **Never dispatch an implementer while planning** - no implementation subagents, no product-code edits. The plan-mode write guard fences this session's `write`/`edit` calls; execution belongs to a separate worker session the user starts.
+- Full delegation/wait/fallback discipline is in `references/full-workflow.md`; the exact DSH tool mapping lives in `references/dsh-harness.md`.
 
 ## Stop rules
 

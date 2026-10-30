@@ -1,7 +1,7 @@
 {
   "name": "dsh-ulw-plan",
   "version": "0.1.0",
-  "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, read-only role agents, inline task delegation, and a plan-mode write guard.",
+  "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, in-conversation consultant/reviewer commands, native subagent research delegation, and a plan-mode write guard.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -15,7 +15,7 @@
     "ulw-execute",
     "planning",
     "workflow",
-    "agent-preset",
+    "command",
     "subagent"
   ],
   "author": "beiyanpiki",
@@ -38,7 +38,6 @@
   },
   "files": [
     "lib/",
-    "prompts/",
     "skills/",
     "locale/",
     "docs/",

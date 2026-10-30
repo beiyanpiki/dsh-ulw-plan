@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "omo 工作流",
-    "description": "把 omo 的「先探索、再规划、后执行」带到 DSH：/ulw-plan、/ulw-execute、四个只读助手、内联 task 与规划期写入门禁。"
+    "description": "把 omo 的「先探索、再规划、后执行」带到 DSH：/ulw-plan、/ulw-execute、会话内咨询与评审命令（/ulw-consult、/ulw-review）、原生 subagent 研究委托与规划期写入门禁。"
   }
 }

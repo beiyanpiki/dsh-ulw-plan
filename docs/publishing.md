@@ -37,7 +37,7 @@ plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": tr
 | --- | --- | --- |
 | `dsh.bundle.patch` | `package.json` → `./cordis.patch.yml` | DSH 据此识别「这是一个 bundle」并合并它的 Host 行 |
 | `engines.dsh` | `package.json` → `>=0.2.0-rc.2` | 安装时做兼容性检查（不满足会拒绝激活） |
-| 运行文件白名单 | `package.json` → `files` | 保证 `lib/ prompts/ skills/ locale/ cordis.patch.yml icon.svg LICENSE docs/` 都进 tarball |
+| 运行文件白名单 | `package.json` → `files` | 保证 `lib/ skills/ locale/ cordis.patch.yml icon.svg LICENSE docs/` 都进 tarball |
 
 ## 1. DSH 如何找到并安装一个插件
 
@@ -66,9 +66,9 @@ pnpm add <spec>
 ```bash
 cd dsh-ulw-plan
 
-node --test                                   # 53 pass
+node --test                                   # 41 pass
 node --check lib/*.js skills/ulw-plan/scripts/*.mjs
-grep -rn '\.omo' skills prompts | wc -l       # 0
+grep -rn '\.omo' skills | wc -l              # 0
 
 npm pack --dry-run                            # 检查实际 tarball 文件列表
 npm view dsh-ulw-plan version                      # 404 = 名字可用（2026-10-23 实测可用）
@@ -83,7 +83,6 @@ icon.svg
 locale/en.json
 locale/zh.json
 lib/*.js
-prompts/*.md
 skills/ulw-plan/**
 skills/ulw-execute/**
 README.md

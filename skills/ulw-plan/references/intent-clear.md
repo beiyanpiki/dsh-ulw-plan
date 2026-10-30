@@ -30,7 +30,7 @@ CLEARANCE CHECK after each turn: affected user named, ideal-state and gap rows r
 </interview>
 
 <approval_and_deliver>
-Run the durable approval gate (mechanics in `full-workflow.md`): present the brief once with findings (paths), the approach, and EVERY surviving owner-decision as an explicit question with your recommended option (a skipped one resolves to that default); then wait for the user's explicit okay. If "start now, or review first?" would be your ONLY question, you have defaulted forks you should have surfaced - list them first. After approval: scaffold the files, run mandatory Metis, APPEND the todos, fill the human TL;DR last. Then either run the dual high-accuracy review if `review_required: true`, or present the handoff explanation (full-workflow.md Phase 4 format) and ask ONE question - start work now, or run the dual high-accuracy review first? Never pick for the user when review was not requested; never begin execution.
+Run the durable approval gate (mechanics in `full-workflow.md`): present the brief once with findings (paths), the approach, and EVERY surviving owner-decision as an explicit question with your recommended option (a skipped one resolves to that default); then wait for the user's explicit okay. If "start now, or review first?" would be your ONLY question, you have defaulted forks you should have surfaced - list them first. After approval: scaffold the files, run the mandatory consultant pass, APPEND the todos, fill the human TL;DR last. Then either run the in-conversation high-accuracy review step if `review_required: true`, or present the handoff explanation (full-workflow.md Phase 4 format) and ask ONE question - start work now, or run the high-accuracy review first (the user can also run `/ulw-review <plan>` directly)? Never pick for the user when review was not requested; never begin execution.
 </approval_and_deliver>
 
 <worked_example>
@@ -40,5 +40,5 @@ Request: "add a 5/min-per-IP rate-limit to `/login`".
 3. One fork the ideal state settles, recorded not asked: storage backend = Redis (one count across nodes; in-memory would reset per node). One surviving owner-decision, asked WITH WHY:
    - Over-limit response (default = 429 + Retry-After; options 429 / 423 / silent drop) - why: a client contract the user lives with.
    - Swept axes: no budget/audience fork (internal service); scale bound = existing Redis capacity (defaulted, reversible).
-4. Approval brief -> explicit okay -> scaffold -> append todos -> if `review_required`, run dual review and deliver receipts; otherwise deliver with the optional review question.
+4. Approval brief -> explicit okay -> scaffold -> append todos -> if `review_required`, run the review step and deliver the round receipts; otherwise deliver with the optional review question.
 </worked_example>
