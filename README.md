@@ -28,7 +28,7 @@ plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": tr
 
 也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-ulw-plan-0.1.0.tgz`、`github:<owner>/dsh-ulw-plan#<ref>` 或（开发时）本仓库的检出目录。
 
-安装后 profile 的 `package.json` 会把 `dsh-ulw-plan` 放进 `dsh.profile.bundles`，`cordis.patch.yml` 的 `insert` 行把 `dsh-ulw-plan` 挂到 Host 平面。**不要**手改 profile 的 `package.json` / `cordis.patch.yml`，也不要在 profile 目录跑 `pnpm`。
+安装后 profile 的 `package.json` 会把 `dsh-ulw-plan` 放进 `dsh.profile.bundles`，包内 `cordis.patch.yml` 的 `insert` 行把 `dsh-ulw-plan` 挂到 Host 平面。**不要手工维护这两处**：依赖/bundle 列表和 bundle 的 `insert` 行由 `plugin_manager` 管理；但 profile 的 `cordis.patch.yml` 是受支持的**用户覆盖层**，用它按 row id（`omo`）覆盖插件配置（例如下面「配置」一节的 `review` 块）。也不要在 profile 目录跑 `pnpm`。
 
 发布到 npm / 上架插件市场 / 升级与私有分发的完整流程见 [`docs/publishing.md`](docs/publishing.md)。
 
@@ -79,11 +79,11 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 
 #### 配置：默认关闭，显式授权
 
-不写 `review`（或写 `enabled: false`）就是安全默认：不装配评审、零模型调用。
+不写 `review`（或写 `enabled: false`）就是安全默认：不授权任何路由、零模型调用。`ulw_review` / `ulw_handoff` 仍会注册（工具面始终可见），但 `require` / `start` 以 `CAPABILITY_UNAVAILABLE` 拒绝（disabled or lacks explicit authorization），不会产生 requirement，也不会退回 inline 审批。
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml
-# 默认：不写 config（或显式关闭），双评审不装配、零调用。
+# 默认：不写 config（或显式关闭），不授权路由、零次模型调用。
 - id: omo
   name: dsh-ulw-plan
   config:
@@ -154,7 +154,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 4. 没有 continuation hook；用 `create_goal` 承担续跑。
 5. 旧 plan-gate 的三条件简化为命令/工具校验：`/ulw-review` 校验唯一目标路径并在 `execute` 模式拒绝；`execute` 模式的产品写入由 `ulw_handoff` 的执行 lease 门禁（required 计划需先通过双评审）。
 6. 新增 `/ulw-mode`。
-7. guard 不管 `bash`（与 omo 的 prometheus-md-only 一致，否则 `scaffold-plan.mjs` 无法产出文件）。
+7. guard 在 **plan 模式**不管 `bash`（与 omo 的 prometheus-md-only 一致，否则 `scaffold-plan.mjs` 无法产出文件）；**execute 模式**的 `bash` 由 `ulw_handoff` 的执行 lease 门禁，未取得 lease 前拒绝。
 8. 模型用 `skill` 工具自行加载 `ulw-plan` 不会切换模式；进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
 
 ## 安装后手工检查清单

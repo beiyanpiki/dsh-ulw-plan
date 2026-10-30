@@ -213,7 +213,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 
 ## 7. 已知行为差异
 
-> 以下第 1–5 条为 A4 重构**之前**的历史记录，已被第 9 节的 DSH-native 形态取代，保留作对照；第 6–10 条仍然有效。
+> 以下第 1–5 条为 A4 重构**之前**的历史记录，已被第 9 节的 DSH-native 形态取代，保留作对照。第 6、7、9、10 条仍然有效；第 8 条只对 **plan 模式**成立——execute 模式的 `bash` 由 handoff 执行 lease 门禁（第 10.2 节）。
 
 1. ~~`task` **一律内联**~~（A4 后 `task` 工具已删除，见第 9 节）。
 2. ~~没有 `task_output` / `task_send` / `task_cancel`~~（A4 后委托走原生 `subagent`，通知与 `send_message` / `interrupt_agent` 均为 Host 自带）。
@@ -222,7 +222,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 5. ~~plan-gate 三条件~~（A4 后由命令校验承担：`/ulw-review` 校验唯一目标，两条角色命令在 `execute` 模式拒绝）。
 6. 新增 `/ulw-mode off|plan|execute` 逃生口（omo 没有）。
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
-8. guard 只管 `write` / `edit`，不管 `bash`（与 omo 的 prometheus-md-only 一致）。
+8. guard 在 **plan 模式**只拦 `write` / `edit`，不拦 `bash`（与 omo 的 prometheus-md-only 一致；`scaffold-plan.mjs` 靠 bash 产出文件）。**execute 模式**的 `bash`、`run_code`、产品写入与实现委托由 `ulw_handoff` 执行 lease 门禁：未取得 lease 前拒绝（第 10.2 节）。
 9. `ulw-execute` 正文保留 omo 的 `codex:<session_id>` 原文；A2 的 DSH 兼容节把前缀映射为 `dsh:<session_id>`，并声明「本节优先」。
 10. 模型通过 `skill` 工具自行加载 `ulw-plan` 不会切换模式：投影只折叠用户显式 `/ulw-plan` 的 `skill-invocation` 消息。要进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
 
@@ -301,9 +301,9 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 ### 10.1 装配、能力检测与版本
 
 - 根入口 `apply(ctx, config)` 始终注册 projection、guard、`/ulw-mode`、`/ulw-consult` 与两个技能；增强评审在独立 sub-effect 中装配。
-- 增强服务按 **API 检测**：`subagents`、`agentPresets`、`llm`、`storage` 逐个 `ctx.get()`；缺任何一个都不装配，`ulw_review` / `ulw_handoff` / `/ulw-review` 返回 `CAPABILITY_UNAVAILABLE` 并列出 missing。基础面继续工作，且**不会**退回 inline 审批。
+- 增强服务按 **API 检测**：`subagents`、`agentPresets`、`llm`、`storage` 逐个 `ctx.get()`；缺任何一个都不完成装配。工具仍然注册（`createReviewEntry` 先注册 `ulw_review` / `ulw_handoff` 与 `/ulw-review` router），入口回答 `CAPABILITY_UNAVAILABLE` 并列出 missing。基础面继续工作，且**不会**退回 inline 审批。
 - 已验证 DSH 版本：**0.2.1-rc.4**（本机安装版本）。`package.json` 的 `engines.dsh` 仍为 `>=0.2.0-rc.2`，那只是基础面下限；该版本早于这组增强 API，未验证，文档不声称旧下限已经具备它们。旧 Host 上增强入口给诊断，不谎报评审完成。
-- 配置是 `apply` 的 `config.review`，由 `lib/review-config.js` 纯解析：默认 `enabled:false`、`storageBackend:'json'`、`backend:'spawn'`、`callBudget:0`（零调用）。`enabled:true` 必须同时有双路由与正偶数 `callBudget`；两路 `normalizeModelId` 相同即拒。错误码：`INVALID_CONFIG`、`ROUTE_UNAUTHORIZED`、`BUDGET_EXHAUSTED`、`CAPABILITY_UNAVAILABLE`。
+- 配置是 `apply` 的 `config.review`，由 `lib/review-config.js` 纯解析：默认 `enabled:false`、`storageBackend:'json'`、`backend:'spawn'`、`callBudget:0`（零调用）。此时工具仍注册，但 `require` / `start` 以 `CAPABILITY_UNAVAILABLE`（disabled or lacks explicit authorization）拒绝，不产生 requirement。`enabled:true` 必须同时有双路由与正偶数 `callBudget`；两路 `normalizeModelId` 相同即拒。错误码：`INVALID_CONFIG`、`ROUTE_UNAUTHORIZED`、`BUDGET_EXHAUSTED`、`CAPABILITY_UNAVAILABLE`。
 - 示例（不含密钥、经解析器断言）在 README；`test/review-package.test.mjs` 直接读取该示例并调用真实解析器。
 
 ### 10.2 运行面（现行）
@@ -312,8 +312,8 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 - 两车道 `practical` / `adversarial` 各用 namespaced preset（`ulw-plan-review-practical` / `ulw-plan-review-adversarial`），`provider:'spawn'`、`delivery:'caller'`、显式 `agentOptions` 与受支持 `outputSchema`；两路一起发起，首份结果不回喂第二路。
 - 输入：服务一次读取不可变 Buffer，身份为 canonical workspace + `.dsh/ulw/plans/<slug>.md` + raw SHA-256；reviewer 只能通过 `ulw_review_input` 分页（至多 16 KiB/页）读取，覆盖连续完整后才允许证据工具与结构化结果。
 - 状态：Host storage 中一个计划一个 record（requirements、current round、history、source/policy/contract hashes、两 lane receipt）；`approved` 需要两个完整、绑定同一 round/launch/source 的终态回执。draft/OKAY 文本永远不是批准。
-- 交接：`check` 绑定 canonical source 与 instruction hash，只有可信 required 记录才要求双审；已经拿到 lease 的 execute 只允许合法任务状态位（`[ ]/[x]/[~]`）变化，instruction 变更撤销 lease 并要求重审。`bootstrap` 调现有 scaffold 函数，不靠放行 bash。
-- 分发：包名/版本（`dsh-ulw-plan@0.1.0`）、bundle row id（`omo`）与零生产依赖不变；`files` 覆盖 `lib/`、`skills/`（含 `plan-lint.mjs` 与两份 reviewer 契约）、`locale/`、`docs/fidelity.md`、`docs/publishing.md`、`cordis.patch.yml`、`icon.svg`、README、LICENSE；内部迁移记录 `docs/migration-plan.md` 与 `test/`、`qa/`、`.dsh/`、`.vendor/` 不进 tarball（迁移记录含本机绝对路径）。CI 在 Node 22/24/26 上跑测试、全部脚本 syntax、rename gate 与 pack 清单。
+- 交接：`check` 绑定 canonical source 与 instruction hash，只有可信 required 记录才要求双审；未取得 lease 前 `bash` / `run_code` / 产品写入 / 实现委托被拒，已经拿到 lease 的 execute 只允许合法任务状态位（`[ ]/[x]/[~]`）变化，instruction 变更撤销 lease 并要求重审。`bootstrap` 调现有 scaffold 函数，不靠放行 bash。
+- 分发：包名/版本（`dsh-ulw-plan@0.1.0`）、bundle row id（`omo`）与零生产依赖不变；`files` 覆盖 `lib/`、`skills/`（含 `plan-lint.mjs` 与两份 reviewer 契约）、`locale/`、`docs/fidelity.md`、`docs/publishing.md`、`cordis.patch.yml`、`icon.svg`、README、LICENSE；内部迁移记录 `docs/migration-plan.md` 与 `test/`、`qa/`、`.dsh/`、`.vendor/` 不进 tarball（迁移记录含本机绝对路径）。CI 在 Node 22/24/26 上跑测试；syntax、rename gate 与 pack 清单在 Node 24 的 packaging job 里跑。
 
 ### 10.3 与 OMO 的差异（记录，不粉饰）
 

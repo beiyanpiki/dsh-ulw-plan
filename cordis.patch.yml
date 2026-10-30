@@ -3,13 +3,15 @@
 # The row loads the package's main entry (lib/index.js) as a plain Cordis
 # plugin. The root contribution always registers: the ulwMode projection, the
 # plan-mode write guard, /ulw-mode, /ulw-consult and the two user-invocable
-# skills. The enhanced review face is assembled separately: ulw_review, the
-# /ulw-review round router and ulw_handoff appear only when the Host exposes
-# subagents, agentPresets, llm and storage. That face is off by default and
-# needs an explicit `review` config with two distinct routes and a positive
-# even callBudget (see README); missing services answer CAPABILITY_UNAVAILABLE
-# instead of approving. Research and worker delegation ride the Host's own
-# subagent tools, so no presets and no per-session composition are needed here.
+# skills. The enhanced review entrypoints (ulw_review, ulw_handoff and the
+# /ulw-review round router) are registered as soon as the plugin loads, but the
+# full review assembly needs the Host services subagents, agentPresets, llm and
+# storage. When one is missing, or when the explicit `review` config is absent
+# or disabled, they answer CAPABILITY_UNAVAILABLE instead of approving. Enabling
+# the face needs an explicit `review` config with two distinct routes and a
+# positive even callBudget (see README). Research and worker delegation ride
+# the Host's own subagent tools, so no presets and no per-session composition
+# are needed here.
 - insert:
     - id: omo
       name: dsh-ulw-plan
