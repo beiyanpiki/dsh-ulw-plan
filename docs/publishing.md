@@ -43,10 +43,11 @@ plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": tr
 
 ### 0.1 分发版行为边界（与 README、`docs/fidelity.md` 一致）
 
-- **基础面装包即用**：`/ulw-plan`、`/ulw-execute`、`/ulw-consult`、`/ulw-mode`、规划期写入门禁，以及 `/ulw-review` 的目标校验。研究委托与实现者派发走 Host 原生 `subagent` / `subagent_fork`（包内没有额外的内联子代理工具）。
-- **增强评审默认关闭**：Host 双车道计划评审与 `ulw_review` / `ulw_handoff` 只在用户显式写 `review` 配置后才有授权；不写（或 `enabled: false`）就是安全默认，零模型调用、不产生 requirement，入口以 `CAPABILITY_UNAVAILABLE` 拒绝，且**不会**退回 inline 审批。
+- **基础面装包即用**：`/ulw-plan`、`/ulw-execute`、`/ulw-consult`、`/ulw-mode` 与规划期写入门禁。研究委托与实现者派发走 Host 原生 `subagent` / `subagent_fork`（包内没有额外的内联子代理工具）。
+- **`ulw_review` 与 `/ulw-review` 默认关闭**：不写 `review`（或 `enabled: false`）就是安全默认——`ulw_review` 的 `require` / `start` 与 `/ulw-review` 以 `CAPABILITY_UNAVAILABLE` 拒绝（disabled or lacks explicit authorization），不产生 requirement、零模型调用，且**不会**退回 inline 审批。
+- **`ulw_handoff` 不受 `review.enabled` 影响**：增强服务齐全时，普通（未要求评审）计划照常拿到 ordinary lease，产品写入放行；required 计划在真正双批准前以 `HANDOFF_REVIEW_REQUIRED` / `HANDOFF_NOT_APPROVED` 拒绝，不会因为关闭评审而被整体禁用。只有 Host 缺少增强服务（`subagents` / `agentPresets` / `llm` / `storage`）时，`ulw_review`、`ulw_handoff` 与 `/ulw-review` 才一起返回 `CAPABILITY_UNAVAILABLE`。
 - **已验证版本是 DSH 0.2.1-rc.4**（本机安装）。`engines.dsh` 的 `>=0.2.0-rc.2` 只是基础面下限，该版本早于这组增强 API，本文不声称旧下限已经具备它们；未装配增强服务的 Host 上，增强入口给诊断，不谎报评审完成。
-- **公开 GUI 的模型 allowlist 不是评审服务的配置**：它只约束那个 GUI 面的工具选择，既不授权评审路由，也不会被插件读取来扩大路由。授权只来自 profile 里显式的 `review` 块（示例与解析规则见 README「配置：默认关闭，显式授权」）。
+- **公开 GUI 的模型 allowlist 不是评审服务的配置**：它只约束那个 GUI 面的工具选择，既不授权评审路由，也不会被插件读取来扩大路由。评审路由的授权只来自 profile 里显式的 `review` 块（示例与解析规则见 README「配置：默认关闭，显式授权」）；`ulw_handoff` 不走这条授权（见上一条）。
 - **profile 归属**：安装器（`plugin_manager` / `dsh plugin add`）负责 profile 的依赖条目与 `dsh.profile.bundles`，不要手工维护这两处，也不要在 profile 目录里跑 `pnpm`；profile 的 `cordis.patch.yml` 是受支持的**用户覆盖层**，用它按 row id（`omo`）覆盖插件配置。
 
 ## 1. DSH 如何找到并安装一个插件
@@ -132,7 +133,7 @@ skills/ulw-plan/scripts/scaffold-plan.mjs
 skills/ulw-plan/SKILL.md
 ```
 
-不要出现 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md` 或 `*.tgz`。`docs/migration-plan.md` 是内部迁移记录（含本机绝对路径），`files` 只放行 `docs/fidelity.md` 与 `docs/publishing.md` 两份文档。`test/review-package.test.mjs` 会把同一份清单（以及“不含私有路径/凭据”的断言）当作包契约反复校验。
+不要出现 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md` 或 `*.tgz`。`docs/migration-plan.md` 是内部迁移记录（含本机绝对路径），`files` 只放行 `docs/fidelity.md` 与 `docs/publishing.md` 两份文档。`test/review-package.test.mjs` 不读这份文档：它自己跑 `npm pack --dry-run --json`，断言必含的运行文件都在、`test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/` 与 `docs/migration-plan.md` 都不在，并对包内每个文件做本机绝对路径与凭据形态扫描。
 
 ### 显示元数据
 
@@ -247,7 +248,7 @@ plugin_manager { "action": "install_bundle", "target": "/绝对路径/dsh-ulw-pl
 plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": true }
 ```
 
-方案 A 只验证包解析与 bundle 声明；要验证真实行为（`/ulw-plan`、`/ulw-execute`、规划期 guard、`ulw_handoff` 的 lease、`ulw_review` 的双车道）仍需在带 Web 的 profile 里装一次，再按 README 的「安装后手工检查清单」跑一遍。
+方案 A 只验证包解析与 bundle 声明；要验证真实行为（`/ulw-plan`、`/ulw-execute`、规划期 guard，以及装齐增强服务后的 `ulw_handoff` lease 与 `ulw_review` 双车道）仍需在带 Web 的 profile 里装一次，再按 README 的「安装后手工检查清单」跑一遍。
 
 ## 5. 升级已有安装
 
@@ -269,7 +270,7 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 2. 在 <https://github.com/awesome-dsh-plugin/awesome-dsh-plugin> 提交一个 PR，在 `## Workflow & Automation` 分类下加一行，格式是：
 
 ```markdown
-- [<owner>/dsh-ulw-plan](https://github.com/<owner>/dsh-ulw-plan) - 一句话说明：omo 的 explore → plan → execute 工作流，含 /ulw-plan、/ulw-execute、两条角色命令、原生子代理研究委托、Host 双车道计划评审与执行 lease 门禁（增强面默认关闭）。
+- [<owner>/dsh-ulw-plan](https://github.com/<owner>/dsh-ulw-plan) - 一句话说明：omo 的 explore → plan → execute 工作流，含 /ulw-plan、/ulw-execute、两条角色命令、原生子代理研究委托、Host 双车道计划评审与执行 lease 门禁（评审授权默认关闭）。
 ```
 
 3. 维护者可要求 `dsh plugin add` 真实可复现、描述与行为一致、分类正确；合并后 dsh-market 和 `dsh-plugin-catalog/index.json` 会自动收录。
@@ -310,7 +311,7 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 
 ## 10. 已验证的打包结果（2026-10-30）
 
-按现行 `files` 白名单重跑了一次打包演练；逐项清单见第 2 节，`test/review-package.test.mjs` 对同一份清单做机械断言。
+按现行 `files` 白名单重跑了一次打包演练；逐项清单见第 2 节，`test/review-package.test.mjs` 用 `npm pack --dry-run --json` 断言必含文件齐全、禁止路径缺席，并做私有路径/凭据扫描（它不读本文）。
 
 - `npm pack --dry-run --json` → **43 个文件**：`package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`lib/` 的 20 个模块、`skills/ulw-plan/**` 的 12 个文件、`skills/ulw-execute/**` 的 2 个文件、`docs/fidelity.md`、`docs/publishing.md`、`README.md`、`LICENSE`；不含 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md`。
 - 把这 43 个文件原样复制到一个隔离目录后：`import` 包入口得到 `apply` / `inject` / `name`（`name` 为 `dsh-ulw-plan`）；`loadSkill('ulw-plan')` 读出含 `ULW-PLAN MODE ENABLED!` 的技能正文；`icon.svg` 与 `locale/{en,zh}.json`（`omo Workflow` / `omo 工作流`）都能从包内读出；两份 reviewer 契约（`plan-reviewer.md`、`plan-adversarial-reviewer.md`）也随包发出。
