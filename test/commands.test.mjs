@@ -12,9 +12,13 @@ import {
   ULW_CONSULT_COMMAND,
   ULW_MODE_USAGE,
   ULW_REVIEW_COMMAND,
+  activeExecuteLease,
+  clearHandoffAuthority,
+  handoffAuthorityOf,
   loadContract,
   registerCommands,
   resolveReviewTarget,
+  setHandoffAuthority,
 } from '../lib/commands.js'
 import { buildReviewFollowup, buildReviewReceipt } from '../lib/review-tools.js'
 
@@ -325,6 +329,68 @@ test('plan and off modes still accept the round and never consult an execute lea
     assert.equal(handoff.calls.length, 0, mode + ' must not read the execute lease')
     assert.equal(setup.agent.followups.length, 1)
   }
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 36: the handoff treatment lives on the plugin seam, not a plain
+// Cordis property
+// ---------------------------------------------------------------------------
+
+test('row 36: the seam is read before the legacy property, and clear removes only the owned authority', () => {
+  const agent = fakeAgent('/ws')
+  const legacy = fakeHandoff({ 'session-1': activeLeaseState() })
+  const ctx = fakeCtx('execute')
+  ctx.handoff = legacy
+  assert.equal(handoffAuthorityOf(ctx), legacy, 'a property-only old composition is still read')
+  assert.deepEqual(activeExecuteLease(ctx, agent), { known: true, active: true })
+
+  const primary = fakeHandoff({ 'session-1': activeLeaseState({ status: 'revoked', lease: { handoffId: 'h2' } }) })
+  setHandoffAuthority(ctx, primary)
+  assert.equal(handoffAuthorityOf(ctx), primary, 'the seam is read before the plain property')
+  assert.equal(ctx.handoff, primary, 'a plain-object Host keeps observing the legacy mirror')
+  assert.deepEqual(activeExecuteLease(ctx, agent), { known: true, active: false })
+
+  clearHandoffAuthority(ctx, { other: 'authority' })
+  assert.equal(handoffAuthorityOf(ctx), primary, 'clearing a foreign authority is a no-op')
+  clearHandoffAuthority(ctx, primary)
+  assert.equal(handoffAuthorityOf(ctx), null)
+  assert.equal(ctx.handoff, undefined)
+
+  // Malformed contexts and authorities never throw and never mint a lease.
+  assert.equal(handoffAuthorityOf(null), null)
+  assert.equal(handoffAuthorityOf('ctx'), null)
+  assert.equal(handoffAuthorityOf({ handoff: null }), null)
+  setHandoffAuthority(null, primary)
+  clearHandoffAuthority(undefined, primary)
+  assert.deepEqual(activeExecuteLease(null, agent), { known: true, active: false })
+})
+
+test('row 36: the slash command reads the seam on a context whose plain handoff property throws', async () => {
+  const cwd = workspace()
+  mkdirSync(join(cwd, '.dsh', 'ulw', 'plans'), { recursive: true })
+  writeFileSync(join(cwd, '.dsh', 'ulw', 'plans', 'feature.md'), '# feature plan')
+  const ctx = fakeCtx('execute')
+  Object.defineProperty(ctx, 'handoff', {
+    configurable: true,
+    get() { throw new Error('cannot get property "handoff" without inject') },
+    set() { throw new Error('cannot set property "handoff" without provide') },
+  })
+  const router = fakeRouter()
+  registerCommands(ctx, { review: router })
+  const agent = fakeAgent(cwd)
+  const leased = fakeHandoff({ 'session-1': activeLeaseState() })
+  setHandoffAuthority(ctx, leased)
+
+  const refused = await invoke(byName(ctx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', agent)
+  assert.equal(refused.kind, 'error')
+  assert.match(refused.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(router.calls.length, 0, 'the refusal never reached the router')
+  assert.equal(agent.followups.length, 0)
+
+  clearHandoffAuthority(ctx, leased)
+  const accepted = await invoke(byName(ctx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', agent)
+  assert.equal(accepted.kind, 'success')
+  assert.equal(router.calls.length, 1)
 })
 
 test('ulw-consult injects the consultant contract with the request', () => {
