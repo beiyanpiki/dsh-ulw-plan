@@ -1094,3 +1094,180 @@ test('after dispose no handoff tool, context injection or lease remains', async 
   assert.equal(stale.code, 'CAPABILITY_UNAVAILABLE')
   assert.equal(stale.lease, null)
 })
+// ---------------------------------------------------------------------------
+// ULW row 34: the tool and the command share one lease-scoped review rule
+// ---------------------------------------------------------------------------
+
+test('row 34 real entry: execute without a lease still accepts both review entries', async (t) => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+
+  const required = await host.invokeTool('ulw_review', { action: 'require', target })
+  assert.equal(required.phase, 'live', JSON.stringify(required.diagnostics))
+  assert.equal(required.accepted, true)
+  const started = await host.invokeTool('ulw_review', { action: 'start', target })
+  assert.equal(started.phase, 'live', JSON.stringify(started.diagnostics))
+  assert.equal(started.accepted, true)
+  assert.equal(started.completed, false)
+  assert.equal(host.startCalls, 2)
+
+  const command = await host.runCommand('ulw-review', target)
+  assert.equal(command.kind, 'success')
+  assert.match(command.text, /accepted round round-/)
+  assert.match(command.text, /NOT a completed review/)
+  t.diagnostic('execute without lease: tool live round=' + started.roundId + ' command receipt=accepted')
+  await host.unload()
+})
+
+test('row 34 real entry: an active execute lease refuses ulw_review and /ulw-review with one stable code and no round', async (t) => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.required, false)
+  const leaseState = host.ctx.handoff.stateForSession('parent-session')
+  assert.equal(leaseState.status, 'leased')
+  assert.equal(typeof leaseState.lease, 'object')
+  const recordsBefore = Object.keys(host.medium.plans).length
+
+  for (const action of ['require', 'start']) {
+    const refused = await host.invokeTool('ulw_review', { action, target })
+    assert.equal(refused.ok, false, action)
+    assert.equal(refused.phase, 'rejected', action)
+    assert.equal(refused.code, 'HANDOFF_ACTIVE_EXECUTE', action)
+    assert.equal(refused.accepted, false, action)
+    assert.equal(refused.completed, false)
+    assert.equal(refused.approved, false)
+    assert.equal(refused.roundId, '', 'a refused ' + action + ' exposes no round')
+    assert.equal(refused.capability.available, true, 'the review capability itself stays available')
+    assert.deepEqual(refused.diagnostics.map((entry) => entry.code), ['HANDOFF_ACTIVE_EXECUTE'])
+  }
+  assert.equal(host.startCalls, 0, 'a refused tool request starts no reviewer pair')
+  assert.equal(host.followups.length, 0)
+
+  const command = await host.runCommand('ulw-review', target)
+  assert.equal(command.kind, 'error')
+  assert.match(command.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(command.text.includes('CAPABILITY_UNAVAILABLE'), false, 'the lease refusal is not a capability diagnostic')
+  assert.equal(/accepted round|NOT a completed review/.test(command.text), false, 'a refusal never fabricates a receipt')
+  assert.equal(host.startCalls, 0, 'a refused command starts no reviewer pair')
+  assert.equal(host.followups.length, 0, 'a refused command injects no followup')
+  assert.equal(Object.keys(host.medium.plans).length, recordsBefore, 'a refused require/start creates no review record')
+
+  const status = await host.invokeTool('ulw_review', { action: 'status', target })
+  assert.equal(status.phase, 'missing')
+  assert.equal(status.roundId, '')
+  assert.equal(status.accepted, false)
+  assert.equal(status.approved, false)
+  t.diagnostic('active leased execute: tool+command=HANDOFF_ACTIVE_EXECUTE records=' + recordsBefore + ' starts=0 followups=0')
+  await host.unload()
+})
+
+test('row 34 real entry: plan and off with a lingering execute lease still accept both review entries', async (t) => {
+  for (const mode of ['plan', 'off']) {
+    const host = createHost({ mode: 'execute' })
+    await apply(host.ctx, rawConfig())
+    await flush()
+    const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+    assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+    host.defaultMode = mode
+    const lingering = host.ctx.handoff.stateForSession('parent-session')
+    assert.equal(lingering.status, 'leased', mode + ' keeps the lease obtained during execute')
+
+    const required = await host.invokeTool('ulw_review', { action: 'require', target })
+    assert.equal(required.phase, 'live', mode + ': ' + JSON.stringify(required.diagnostics))
+    assert.equal(required.code, '', mode)
+    const started = await host.invokeTool('ulw_review', { action: 'start', target })
+    assert.equal(started.phase, 'live', mode + ': ' + JSON.stringify(started.diagnostics))
+    assert.equal(started.accepted, true, mode)
+    assert.equal(started.completed, false, mode)
+
+    const command = await host.runCommand('ulw-review', target)
+    assert.equal(command.kind, 'success', mode)
+    assert.match(command.text, /accepted round|already completed/)
+    t.diagnostic(mode + ' mode with a lingering execute lease: tool+command accepted round=' + started.roundId)
+    await host.unload()
+  }
+})
+
+test('row 34 real entry: an accepted round stays observable and cancellable while the execute lease is active', async (t) => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const second = '.dsh/ulw/plans/second.md'
+  writeFileSync(join(host.workspace, second), VALID_PLAN)
+
+  const started = await host.invokeTool('ulw_review', { action: 'start', target: second })
+  assert.equal(started.phase, 'live', JSON.stringify(started.diagnostics))
+  assert.equal(started.accepted, true)
+  assert.equal(host.startCalls, 2)
+
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.required, false)
+  assert.equal(host.ctx.handoff.stateForSession('parent-session').status, 'leased')
+
+  const refused = await host.invokeTool('ulw_review', { action: 'require', target: second })
+  assert.equal(refused.code, 'HANDOFF_ACTIVE_EXECUTE')
+  assert.equal(host.startCalls, 2, 'the refusal starts no second reviewer pair')
+
+  const status = await host.invokeTool('ulw_review', { action: 'status', roundId: started.roundId })
+  assert.equal(status.phase, 'live', JSON.stringify(status.diagnostics))
+  assert.equal(status.roundId, started.roundId)
+  assert.equal(status.accepted, true)
+  assert.equal(status.completed, false)
+
+  const cancelled = await host.invokeTool('ulw_review', { action: 'cancel', roundId: started.roundId })
+  assert.equal(cancelled.state, 'cancelled')
+  assert.equal(cancelled.accepted, false)
+  assert.equal(cancelled.completed, false)
+  assert.equal(cancelled.approved, false)
+
+  const waited = await host.invokeTool('ulw_review', { action: 'wait', roundId: started.roundId })
+  assert.equal(waited.state, 'cancelled')
+  assert.equal(waited.completed, false)
+  assert.equal(waited.approved, false)
+  assert.equal(host.startCalls, 2)
+  t.diagnostic('active lease + accepted round: status=live cancel=cancelled wait=cancelled starts=2')
+  await host.unload()
+})
+
+test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed for both entries', async (t) => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const authority = host.ctx.handoff
+  assert.ok(authority, 'the review sub-effect injected the handoff authority')
+  const failures = [
+    { name: 'throwing', handoff: { stateForSession() { throw new Error('handoff lease storage unavailable') } } },
+    { name: 'asynchronous', handoff: { async stateForSession() { return { status: 'leased', lease: { handoffId: 'forged' } } } } },
+  ]
+  try {
+    for (const failure of failures) {
+      host.ctx.handoff = failure.handoff
+      for (const action of ['require', 'start']) {
+        const refused = await host.invokeTool('ulw_review', { action, target })
+        assert.equal(refused.ok, false, failure.name + '/' + action)
+        assert.equal(refused.phase, 'rejected', failure.name + '/' + action)
+        assert.equal(refused.code, 'CAPABILITY_UNAVAILABLE', failure.name + '/' + action)
+        assert.equal(refused.code === 'HANDOFF_ACTIVE_EXECUTE', false, 'a failed lookup is not a lease refusal')
+        assert.equal(refused.accepted, false)
+        assert.equal(refused.roundId, '')
+      }
+      const command = await host.runCommand('ulw-review', target)
+      assert.equal(command.kind, 'error', failure.name)
+      assert.match(command.text, /CAPABILITY_UNAVAILABLE/, failure.name)
+      assert.equal(command.text.includes('HANDOFF_ACTIVE_EXECUTE'), false, failure.name)
+      assert.equal(host.startCalls, 0, failure.name + ' starts no reviewer pair')
+      assert.equal(host.followups.length, 0, failure.name + ' injects no followup')
+    }
+    assert.equal(Object.keys(host.medium.plans).length, 0, 'a failed lookup never creates a review record')
+    t.diagnostic('fail-closed lookup: throwing+asynchronous => CAPABILITY_UNAVAILABLE, zero rounds, zero followups')
+  } finally {
+    host.ctx.handoff = authority
+  }
+  await host.unload()
+})
