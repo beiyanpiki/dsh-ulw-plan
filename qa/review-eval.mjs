@@ -37,6 +37,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ERROR_CODES, WARNING_CODES, isCanonicalPlanSlug, lintPlan, parsePlanDocument } from '../lib/review-lint.js'
 import { REVIEW_LANES, validateReviewResult } from '../lib/review-protocol.js'
 import { parseReviewConfig } from '../lib/review-config.js'
+import { createReviewCoordinator } from '../lib/review-coordinator.js'
+import { createReviewInput } from '../lib/review-input.js'
+import { openReviewStore } from '../lib/review-store.js'
+import { preflightReviewRoutes } from '../lib/review-transport.js'
+import { REVIEW_INPUT_TOOL } from '../lib/review-policy.js'
 
 export const EVAL_SCHEMA = 'ulw-review-eval/v1'
 export const EVAL_MODES = Object.freeze(['replay', 'live'])
@@ -185,6 +190,38 @@ export function maskSecrets(value, secrets = []) {
     return node
   }
   return visit(value)
+}
+
+/** Report strings are evidence, not host paths: strip absolute POSIX locations
+ * while preserving operator endpoint URLs. Scratch/workspace paths never appear
+ * in a written report or a failure/lab_error message. */
+function sanitizeString(text, roots) {
+  let value = text
+  for (const root of roots) if (typeof root === 'string' && root.length > 1) value = value.split(root).join('<path>')
+  const urls = []
+  value = value.replace(/https?:\/\/[^\s"'\x60)]+/g, match => {
+    urls.push(match)
+    return '\u0000URL' + (urls.length - 1) + '\u0000'
+  })
+  value = value.replace(/\/(?:home|tmp|var|private|mnt|opt|root|Users)\/[^\s"'\x60),;]+/g, '<path>')
+  value = value.replace(/\u0000URL(\d+)\u0000/g, (_, index) => urls[Number(index)])
+  return value
+}
+function sanitizeForReport(value, roots) {
+  const visit = node => {
+    if (typeof node === 'string') return sanitizeString(node, roots)
+    if (Array.isArray(node)) return node.map(visit)
+    if (isPlainObject(node)) {
+      const out = {}
+      for (const [key, child] of Object.entries(node)) out[key] = visit(child)
+      return out
+    }
+    return node
+  }
+  return visit(value)
+}
+function finalizeReport(report, { secrets = [], roots = [] } = {}) {
+  return withDigest(maskSecrets(sanitizeForReport(report, roots), secrets))
 }
 
 // ---------------------------------------------------------------------------
@@ -789,7 +826,7 @@ function failureReport({ mode, error, sourceHash = null, corpus = null, authoriz
     cleanup: { scratch_created: false, workspaces: 0, scratch_removed: true },
     resume,
   }
-  return withDigest(report)
+  return report
 }
 
 function corpusReport(loaded) {
@@ -813,7 +850,7 @@ export async function runReplay({ manifestPath = DEFAULT_MANIFEST, corpusDir, ou
   try {
     loaded = await readManifest(manifestFile)
   } catch (error) {
-    const report = failureReport({ mode: 'replay', error })
+    const report = finalizeReport(failureReport({ mode: 'replay', error }), { roots: [output, corpus, REPO_ROOT] })
     const reportPath = await writeReport(output, 'replay_report.json', report)
     return { exitCode: EXIT_CODES.replay_failed, report, reportPath, outDir: output }
   }
@@ -866,7 +903,7 @@ export async function runReplay({ manifestPath = DEFAULT_MANIFEST, corpusDir, ou
     cleanup,
     resume: null,
   }
-  const finalReport = withDigest(report)
+  const finalReport = finalizeReport(report, { roots: [output, scratchRoot, corpus, REPO_ROOT] })
   const reportPath = await writeReport(output, 'replay_report.json', finalReport)
   return {
     exitCode: finalReport.mechanism_passed ? EXIT_CODES.ok : EXIT_CODES.replay_failed,
@@ -1020,111 +1057,392 @@ async function scanForSentinel(root, sentinel) {
 export { scanForSentinel }
 
 /**
- * Wait for one lane under a hard bound. The timer aborts the signal for cooperative
- * transports, but the race is what guarantees the runner itself returns; an
- * uncooperative transport cannot hold the run open past the bound.
+ * Hard-bound await around coordinator start/wait. The timer aborts cooperative
+ * transports; the race guarantees the runner itself returns even when one does not.
  */
-async function callLane({ transport, args, timeoutMs }) {
-  const controller = new AbortController()
+async function withBound(promise, timeoutMs, code, label, controller) {
   const started = Date.now()
   let timer
+  const pending = Promise.resolve(promise)
+  pending.catch(() => {})
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort()
-      reject(new EvalError('LIVE_TIMEOUT', '$.lane', 'lane exceeded the ' + timeoutMs + 'ms bound'))
+      try { controller?.abort() } catch { /* the timeout owns the failure */ }
+      reject(new EvalError(code, label, label + ' exceeded the ' + timeoutMs + 'ms bound'))
     }, timeoutMs)
   })
   try {
-    const value = await Promise.race([
-      Promise.resolve().then(() => transport({ ...args, signal: controller.signal })),
-      deadline,
-    ])
-    return { ok: true, value, latency_ms: Date.now() - started, timeout: false }
+    return { ok: true, value: await Promise.race([pending, deadline]), latency_ms: Date.now() - started }
   } catch (error) {
-    return {
-      ok: false,
-      error,
-      latency_ms: Date.now() - started,
-      timeout: error instanceof EvalError && error.code === 'LIVE_TIMEOUT',
-    }
+    return { ok: false, error, latency_ms: Date.now() - started, timeout: error instanceof EvalError && error.code === code }
   } finally {
     clearTimeout(timer)
   }
 }
 
-function createHttpTransport({ endpoint, key, fetchImpl }) {
-  let networkAttempts = 0
-  const doFetch = fetchImpl ?? globalThis.fetch
+/** In-memory KV unit for the real review store; one fresh unit per evaluation case. */
+function createMemoryBackend() {
+  const tables = { plans: {} }
   return {
-    get networkAttempts() { return networkAttempts },
-    async start({ caseId, lane, route, target, planSha, planText, signal }) {
-      if (typeof doFetch !== 'function') fail('CAPABILITY_UNAVAILABLE', '$.transport', 'no fetch implementation is available for live evaluation')
-      networkAttempts += 1
-      const response = await doFetch(endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
-        body: JSON.stringify({
-          caseId,
-          lane,
-          route,
-          plan: { relativePath: target, sha256: planSha, content: planText },
-          workspaceFiles: [],
-        }),
-        signal,
-      })
-      if (!response.ok) fail('LANE_ERROR', '$.transport', 'evaluation endpoint returned HTTP ' + response.status)
-      const payload = await response.json()
-      const result = isPlainObject(payload) && Object.hasOwn(payload, 'result') ? payload.result : payload
-      return {
-        result,
-        model: payload?.model ?? route.model,
-        version: payload?.version ?? 'unknown',
-        usage: payload?.usage ?? { tokens: null, cost_usd: null },
-        latency_ms: payload?.latency_ms,
-      }
+    kv: {
+      async open() {
+        return {
+          async loadAll() { return { tables: structuredClone(tables), global: null } },
+          async putRecord(table, key, value) { tables[table][key] = structuredClone(value) },
+          async close() {},
+        }
+      },
     },
   }
 }
 
-function liveArmMetrics(cases) {
-  return applyGroupMetrics(metricsFor(cases, 'live'))
+/** Drive the real input service through every page; this is how coverage becomes complete. */
+async function deliverAllPages(input, childId) {
+  let cursor
+  for (let page = 0; page < 10000; page += 1) {
+    const exec = { name: REVIEW_INPUT_TOOL, agent: { session: { id: childId } }, callId: 'eval-' + childId + '-' + page }
+    const args = cursor === undefined ? {} : { cursor }
+    const value = input.definition.execute(args, exec)
+    const content = input.definition.output.render(args, value)
+    const observed = input.observeResult(exec, { isError: false, value, content })
+    if (!observed.ok) fail('INPUT_DELIVERY_INCOMPLETE', '$.input', 'plan page delivery failed: ' + observed.reason)
+    if (value.done) return observed
+    cursor = value.nextCursor
+  }
+  fail('INPUT_DELIVERY_INCOMPLETE', '$.input', 'plan page delivery did not terminate')
 }
 
-/** Run an explicitly authorized live evaluation through one observable pipeline. */
+function structuralOf(spec, repo) {
+  let lint
+  try {
+    lint = lintPlan({ content: repo.planText, path: repo.target, workspace: repo.root })
+  } catch (error) {
+    lint = { valid: false, diagnostics: [], sha256: null }
+  }
+  const expected = {
+    valid: spec.expected.lint.valid,
+    errors: expectedErrorTuples(spec.expected.lint),
+    warnings: expectedWarningTuples(spec.expected.lint),
+  }
+  const actual = {
+    valid: lint.valid,
+    errors: lint.sha256 === null ? [] : errorTuples(lint),
+    warnings: lint.sha256 === null ? [] : warningTuples(lint),
+  }
+  actual.matches_expected = JSON.stringify(actual.errors) === JSON.stringify(expected.errors)
+    && JSON.stringify(actual.warnings) === JSON.stringify(expected.warnings)
+    && actual.valid === expected.valid
+  return { expected, actual, lint }
+}
+
+function pickReceipt(receipt) {
+  if (!isPlainObject(receipt)) return null
+  return {
+    lane: receipt.lane,
+    roundId: receipt.roundId,
+    launchId: receipt.launchId,
+    childId: receipt.childId,
+    runId: receipt.runId,
+    planSha256: receipt.planSha256,
+    instructionSha256: receipt.instructionSha256,
+    verdict: receipt.verdict,
+    stopReason: receipt.stopReason,
+    resultSha256: receipt.resultSha256,
+    coverage: receipt.coverage,
+  }
+}
+
+function emptyCoordinatorView() {
+  return {
+    require: { ok: false, outcome: null, code: null },
+    start: { ok: false, outcome: null, code: null },
+    wait: { ok: false, outcome: null, code: null },
+    approval: { approved: false, reasons: [], roundId: null },
+    receipts: null,
+    state: null,
+    revision: null,
+    budget: null,
+  }
+}
+
+/**
+ * One case through the real coordinator: require -> start (real lint/preflight/
+ * route/budget), programmatic full input delivery, wait. The activation transport
+ * is the only injected piece; every state transition, receipt and approval comes
+ * from createReviewCoordinator and the real store.
+ */
+async function runCoordinatorCase({ spec, repo, caseReport, auth, remainingCalls, timeoutMs, startActivations, record, workspaceLint }) {
+  const store = await openReviewStore({ backend: createMemoryBackend() })
+  const input = createReviewInput({})
+  const controller = new AbortController()
+  const ids = {
+    roundId: () => 'eval-round-' + spec.caseId,
+    launchId: () => 'eval-launch-' + spec.caseId,
+    childId: lane => 'eval-' + spec.caseId + '-' + lane,
+  }
+  const config = { enabled: true, backend: 'spawn', callBudget: remainingCalls, lanes: auth.routes }
+  const llm = {
+    resolveCallConfig(requested) {
+      const route = { provider: requested.provider, model: requested.model, maxTokens: requested.maxTokens }
+      if (Object.hasOwn(requested, 'reasoningEffort')) route.reasoningEffort = requested.reasoningEffort
+      return route
+    },
+  }
+  const preflight = async ({ llm: preflightLlm, config: preflightConfig, signal }) => {
+    if (!workspaceLint || workspaceLint.valid !== true) {
+      throw new EvalError('LINT_FAILED', '$.lint', 'workspace lint rejected the plan before any activation')
+    }
+    return preflightReviewRoutes({ llm: preflightLlm, config: preflightConfig, signal })
+  }
+  let transportCalls = 0
+  const activation = async request => {
+    transportCalls += 1
+    const ctx = {
+      caseId: spec.caseId,
+      workspace: repo.root,
+      target: repo.target,
+      planSha: repo.planSha,
+      roundId: ids.roundId(),
+      launchId: ids.launchId(),
+      record,
+    }
+    return startActivations({ ...request, eval: ctx, signal: request.signal })
+  }
+  let cancellation = null
+  try {
+    const coordinator = createReviewCoordinator({
+      workspace: repo.root,
+      config,
+      store,
+      input,
+      startActivations: activation,
+      preflight,
+      llm,
+      signal: controller.signal,
+      ids,
+    })
+    const required = await coordinator.require({ target: repo.target })
+    caseReport.coordinator.require = { ok: required.ok === true, outcome: required.outcome ?? null, code: required.code ?? null }
+    if (!required.ok) {
+      caseReport.failures.push({ code: required.code ?? 'REQUIRE_FAILED', path: '$.require', message: 'coordinator refused the requirement' })
+      return { cancelled: null }
+    }
+    const startedBound = await withBound(coordinator.start({ target: repo.target }), timeoutMs, 'LIVE_TIMEOUT', 'coordinator start', controller)
+    caseReport.transport_calls = transportCalls
+    caseReport.requests = transportCalls * REVIEW_LANES.length
+    caseReport.model_starts = caseReport.requests
+    if (!startedBound.ok) {
+      caseReport.failures.push(failureOf(failureError(startedBound)))
+      if (startedBound.timeout) cancellation = { reason: 'CASE_TIMEOUT', caseId: spec.caseId, bound_ms: timeoutMs, elapsed_ms: startedBound.latency_ms, bounded: true }
+      return { cancelled: cancellation }
+    }
+    const started = startedBound.value
+    caseReport.coordinator.start = { ok: started.ok === true, outcome: started.outcome ?? null, code: started.code ?? null }
+    if (!started.ok) {
+      caseReport.failures.push({ code: started.code ?? 'START_REJECTED', path: '$.start', message: 'coordinator refused to start the round' })
+      return { cancelled: null }
+    }
+    for (const lane of REVIEW_LANES) await deliverAllPages(input, started.round.lanes[lane].childId)
+    const waitedBound = await withBound(coordinator.wait({ roundId: started.round.roundId }), timeoutMs, 'LIVE_TIMEOUT', 'coordinator wait', controller)
+    if (!waitedBound.ok) {
+      caseReport.failures.push(failureOf(failureError(waitedBound)))
+      if (waitedBound.timeout) cancellation = { reason: 'CASE_TIMEOUT', caseId: spec.caseId, bound_ms: timeoutMs, elapsed_ms: waitedBound.latency_ms, bounded: true }
+      return { cancelled: cancellation }
+    }
+    const waited = waitedBound.value
+    caseReport.coordinator.wait = { ok: waited.ok === true, outcome: waited.outcome ?? null, code: waited.code ?? null }
+    caseReport.coordinator.budget = waited.budget ?? null
+    const status = store.status({ workspace: repo.root, target: repo.target })
+    const stored = status.record
+    const round = stored?.rounds?.find(entry => entry.roundId === started.round.roundId)
+    const actualLanes = {}
+    for (const lane of REVIEW_LANES) {
+      const laneState = round?.lanes?.[lane]
+      const result = laneState?.result
+      actualLanes[lane] = {
+        valid: laneState?.status === 'completed' && isPlainObject(result),
+        verdict: result?.verdict ?? null,
+        blocker_ids: sorted((result?.blockers ?? []).map(blocker => blocker.id)),
+        note_count: Array.isArray(result?.notes) ? result.notes.length : 0,
+        summary: typeof result?.summary === 'string' ? result.summary : '',
+      }
+    }
+    caseReport.actual.lanes = actualLanes
+    caseReport.coordinator.approval = {
+      approved: status.approval?.approved === true,
+      reasons: [...(status.approval?.reasons ?? [])],
+      roundId: status.approval?.roundId ?? null,
+    }
+    caseReport.coordinator.receipts = status.approval?.receipts
+      ? { practical: pickReceipt(status.approval.receipts.practical), adversarial: pickReceipt(status.approval.receipts.adversarial) }
+      : null
+    caseReport.coordinator.state = stored?.state ?? null
+    caseReport.coordinator.revision = stored?.revision ?? null
+    caseReport.complete = actualLanes.practical.valid && actualLanes.adversarial.valid
+    if (caseReport.complete) {
+      caseReport.arms = caseArms({
+        classification: spec.classification,
+        spec,
+        actualLanes,
+        mode: 'live',
+        laneLatency: { practical: record?.laneLatency?.practical ?? 0, adversarial: record?.laneLatency?.adversarial ?? 0 },
+      })
+    } else {
+      caseReport.failures.push({ code: 'LIVE_INCOMPLETE', path: '$.wait', message: 'the coordinator did not complete both lanes' })
+    }
+    return { cancelled: null }
+  } catch (error) {
+    caseReport.failures.push(failureOf(error))
+    return { cancelled: null }
+  } finally {
+    try { await store.close() } catch { /* the case failure already owns the report */ }
+  }
+}
+
+function failureError(bound) {
+  return bound.error ?? new EvalError('LIVE_TIMEOUT', '$.lane', 'bounded operation failed')
+}
+
+/** The HTTP endpoint is only the activation transport. It receives the coordinator
+ * prompt and assignment identities, never plan bytes or a key in the body. */
+function createHttpStartActivations({ endpoint, key, timeoutMs, fetchImpl }) {
+  const doFetch = fetchImpl ?? globalThis.fetch
+  let networkAttempts = 0
+  const start = async request => {
+    if (typeof doFetch !== 'function') fail('CAPABILITY_UNAVAILABLE', '$.transport', 'no fetch implementation is available for live evaluation')
+    request.budget.reserve(REVIEW_LANES.length)
+    const ctx = request.eval
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    const lanes = REVIEW_LANES.map(lane => {
+      const childId = request.childIds[lane]
+      const runId = 'run-' + ctx.caseId + '-' + lane
+      const result = (async () => {
+        networkAttempts += 1
+        const laneController = new AbortController()
+        const relay = () => laneController.abort()
+        controller.signal.addEventListener('abort', relay, { once: true })
+        let timer
+        const deadline = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            laneController.abort()
+            reject(new EvalError('LANE_TIMEOUT', '$.lane', 'activation exceeded the ' + timeoutMs + 'ms bound'))
+          }, timeoutMs)
+        })
+        const startedAt = Date.now()
+        try {
+          const response = await Promise.race([
+            doFetch(endpoint, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
+              body: JSON.stringify({
+                lane,
+                childId,
+                runId,
+                roundId: ctx.roundId,
+                launchId: ctx.launchId,
+                planSha256: ctx.planSha,
+                route: request.config.lanes[lane],
+                prompt: request.prompts[lane],
+              }),
+              signal: laneController.signal,
+            }),
+            deadline,
+          ])
+          if (!response.ok) fail('LANE_ERROR', '$.transport', 'evaluation endpoint returned HTTP ' + response.status)
+          const payload = await response.json()
+          const result = isPlainObject(payload) && Object.hasOwn(payload, 'result') ? payload.result : payload
+          ctx.record?.(lane, {
+            model: payload?.model ?? request.config.lanes[lane].model,
+            version: payload?.version ?? 'unknown',
+            usage: payload?.usage ?? { tokens: null, cost_usd: null },
+            latency_ms: payload?.latency_ms ?? (Date.now() - startedAt),
+          })
+          return result
+        } finally {
+          clearTimeout(timer)
+          controller.signal.removeEventListener('abort', relay)
+        }
+      })()
+      result.catch(() => {})
+      return {
+        lane,
+        childId,
+        expectedChildId: childId,
+        messageId: 'msg-' + ctx.caseId + '-' + lane,
+        preset: 'ulw-plan-review-' + lane,
+        runId,
+        route: request.config.lanes[lane],
+        result,
+        dispose: async () => { controller.abort() },
+      }
+    })
+    const handle = {
+      provider: 'spawn',
+      lanes,
+      budget: { reserved: REVIEW_LANES.length, released: 0, consumed: REVIEW_LANES.length },
+      runs: {
+        snapshot: () => ({
+          lanes: lanes.map(lane => ({ lane: lane.lane, childId: lane.childId, runId: lane.runId, started: true, ended: false })),
+          unmatchedStarts: [],
+          unmatchedEnds: [],
+          conflicts: [],
+        }),
+      },
+      releaseObservers: () => { request.signal?.removeEventListener('abort', onAbort) },
+      dispose: async () => { controller.abort(); request.signal?.removeEventListener('abort', onAbort) },
+    }
+    return handle
+  }
+  Object.defineProperty(start, 'networkAttempts', { get: () => networkAttempts })
+  return start
+}
+
+async function readExistingReport(file) {
+  try {
+    const value = JSON.parse(await fs.readFile(file, 'utf8'))
+    return isPlainObject(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+/** Run an explicitly authorized live evaluation through the real coordinator. */
 export async function runLive(options = {}) {
   const started = Date.now()
   const output = resolve(options.outDir ?? join(REPO_ROOT, '.qa-ws', 'review-eval', 'live'))
   const reportPath = join(output, 'live_report.json')
+  const authRoots = [output, ...(typeof options.authorizationFile === 'string' ? [dirname(resolve(options.authorizationFile))] : [])]
   let auth
   try {
     auth = await authorizeLive(options)
   } catch (error) {
+    const existing = await readExistingReport(reportPath)
+    const name = existing === null ? 'live_report.json' : 'live_report.auth_failed.json'
     const report = failureReport({
       mode: 'live',
       error,
       authorization: authFailureSummary(error, options.authorizationFile),
-      resume: { detected_partial: false, reused: false },
+      resume: { detected_partial: existing?.complete === false, reused: false },
     })
-    const finalReport = maskSecrets(report, [])
-    const written = await writeReport(output, 'live_report.json', finalReport)
+    const finalReport = finalizeReport(report, { roots: authRoots })
+    const written = await writeReport(output, name, finalReport)
     return { exitCode: EXIT_CODES.live_auth_required, report: finalReport, reportPath: written, outDir: output, cancelled: false }
   }
 
   const resume = { detected_partial: false, reused: false }
-  try {
-    const previous = JSON.parse(await fs.readFile(reportPath, 'utf8'))
-    if (previous?.mode === 'live' && previous.complete === false) resume.detected_partial = true
-  } catch {
-    // No previous live report; a fresh run is the normal case.
-  }
+  const previous = await readExistingReport(reportPath)
+  if (previous !== null && previous.mode === 'live' && previous.complete === false) resume.detected_partial = true
 
   const manifestFile = resolve(options.manifestPath ?? DEFAULT_MANIFEST)
+  const corpus = resolve(options.corpusDir ?? dirname(manifestFile))
   let loaded
   try {
     loaded = await readManifest(manifestFile)
   } catch (error) {
     const report = failureReport({ mode: 'live', error, authorization: authorizationSummary(auth), resume, status: 'lab_error' })
-    const finalReport = maskSecrets(report, [auth.key])
+    const finalReport = finalizeReport(report, { secrets: [auth.key], roots: [output, corpus, REPO_ROOT] })
     const written = await writeReport(output, 'live_report.json', finalReport)
     return { exitCode: EXIT_CODES.live_lab_error, report: finalReport, reportPath: written, outDir: output, cancelled: false }
   }
@@ -1134,43 +1452,53 @@ export async function runLive(options = {}) {
     if (spec === undefined) {
       const error = new EvalError('UNKNOWN_FIXTURE', '$.fixtures', 'authorized fixture ' + caseId + ' is not in the truth corpus')
       const report = failureReport({ mode: 'live', error, sourceHash: loaded.sourceHash, corpus: corpusReport(loaded), authorization: authorizationSummary(auth), resume, status: 'lab_error' })
-      const finalReport = maskSecrets(report, [auth.key])
+      const finalReport = finalizeReport(report, { secrets: [auth.key], roots: [output, corpus, REPO_ROOT] })
       const written = await writeReport(output, 'live_report.json', finalReport)
       return { exitCode: EXIT_CODES.live_lab_error, report: finalReport, reportPath: written, outDir: output, cancelled: false }
     }
     specs.push(spec)
   }
 
-  const corpus = resolve(options.corpusDir ?? dirname(manifestFile))
   await fs.mkdir(output, { recursive: true })
   const scratchRoot = await fs.mkdtemp(join(output, 'scratch-'))
-  const liveTransport = typeof options.transport === 'function'
-    ? { start: options.transport, networkAttempts: 0 }
-    : createHttpTransport({ endpoint: auth.endpoint, key: auth.key })
-  const callTransport = liveTransport.start.bind(liveTransport)
   const timeoutMs = Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 60000
   const sentinel = typeof options.sentinel === 'string' && options.sentinel !== ''
     ? options.sentinel
     : 'ULW_SENTINEL_' + createHash('sha256').update(String(Math.random()) + String(started)).digest('hex').slice(0, 32)
   const mask = [auth.key, sentinel]
+  const side = {
+    tokens: 0,
+    cost: 0,
+    tokensKnown: true,
+    costKnown: true,
+    latency: 0,
+    models: { practical: null, adversarial: null },
+  }
+  const record = (lane, meta) => {
+    const usage = normalizeUsage(meta?.usage)
+    if (usage.tokens === null) side.tokensKnown = false
+    else side.tokens += usage.tokens
+    if (usage.cost_usd === null) side.costKnown = false
+    else side.cost += usage.cost_usd
+    if (typeof meta?.latency_ms === 'number' && Number.isFinite(meta.latency_ms)) side.latency += meta.latency_ms
+    side.models[lane] = { model: meta?.model ?? null, version: meta?.version ?? null }
+  }
+  const startActivations = typeof options.startActivations === 'function'
+    ? options.startActivations
+    : createHttpStartActivations({ endpoint: auth.endpoint, key: auth.key, timeoutMs, fetchImpl: options.fetchImpl })
   const liveCases = []
   const labErrors = []
   let calls = 0
-  let modelStarts = 0
-  let totalTokens = 0
-  let tokensKnown = true
-  let totalCost = 0
-  let costKnown = true
-  let latencyTotal = 0
+  let transportCalls = 0
+  let status = 'complete'
   let budgetExhausted = false
   let cancelled = null
-  let status = 'complete'
   let workspaces = 0
   let scratchRemoved = true
-  const models = { practical: null, adversarial: null }
   try {
     outer: for (const spec of specs) {
-      if (calls + 2 > auth.maxCalls) {
+      const remaining = auth.maxCalls - calls
+      if (remaining < REVIEW_LANES.length) {
         budgetExhausted = true
         status = 'budget_exhausted'
         break
@@ -1180,13 +1508,15 @@ export async function runLive(options = {}) {
         classification: spec.classification,
         defect: spec.defect,
         structural: spec.structural,
+        plan: planTargetOf(spec),
         complete: false,
-        lanes: {},
-        arms: null,
+        expected: { structural: { valid: spec.expected.lint.valid, errors: expectedErrorTuples(spec.expected.lint), warnings: expectedWarningTuples(spec.expected.lint) } },
+        actual: { planSha256: null, structural: { valid: null, errors: [], warnings: [], matches_expected: false }, lanes: {} },
+        coordinator: emptyCoordinatorView(),
         failures: [],
-        calls: 0,
-        model_starts: 0,
-        latency_ms: 0,
+        requests: 0,
+        transport_calls: 0,
+        arms: null,
       }
       liveCases.push(caseReport)
       let repo
@@ -1199,129 +1529,41 @@ export async function runLive(options = {}) {
         status = 'lab_error'
         break
       }
-      const initialHits = await scanForSentinel(join(scratchRoot, spec.caseId), sentinel)
-      if (initialHits.length > 0) {
-        labErrors.push({ code: 'LIVE_SENTINEL_LEAK', caseId: spec.caseId, lane: null, files: initialHits })
+      const structural = structuralOf(spec, repo)
+      caseReport.expected.structural = structural.expected
+      caseReport.actual = { planSha256: repo.planSha, structural: structural.actual, lanes: {} }
+      const outcome = await runCoordinatorCase({
+        spec,
+        repo,
+        caseReport,
+        auth,
+        remainingCalls: remaining,
+        timeoutMs,
+        startActivations,
+        record,
+        workspaceLint: structural.lint,
+      })
+      transportCalls += caseReport.transport_calls
+      calls += caseReport.requests
+      if (outcome.cancelled !== null) {
+        cancelled = { ...outcome.cancelled, elapsed_ms: Date.now() - started }
+        status = 'cancelled'
+        break
+      }
+      const hits = await scanForSentinel(repo.root, sentinel)
+      if (hits.length > 0) {
+        labErrors.push({ code: 'LIVE_SENTINEL_LEAK', caseId: spec.caseId, files: hits })
         status = 'lab_error'
         break
       }
-      for (const lane of REVIEW_LANES) {
-        if (calls >= auth.maxCalls) {
-          budgetExhausted = true
-          status = 'budget_exhausted'
-          break outer
-        }
-        const route = auth.routes[lane]
-        const binding = {
-          lane,
-          roundId: 'eval-round-1',
-          launchId: 'eval-' + spec.caseId + '-' + lane,
-          planSha256: repo.planSha,
-        }
-        calls += 1
-        modelStarts += 1
-        caseReport.calls += 1
-        caseReport.model_starts += 1
-        const outcome = await callLane({
-          transport: callTransport,
-          timeoutMs,
-          args: {
-            caseId: spec.caseId,
-            lane,
-            route,
-            roundId: binding.roundId,
-            launchId: binding.launchId,
-            workspace: join(scratchRoot, spec.caseId),
-            target: repo.target,
-            planSha: repo.planSha,
-            planText: repo.planText,
-          },
-        })
-        latencyTotal += outcome.latency_ms
-        caseReport.latency_ms += outcome.latency_ms
-        if (!outcome.ok) {
-          const failure = failureOf(outcome.error)
-          caseReport.failures.push(failure)
-          caseReport.lanes[lane] = { complete: false, valid: false, verdict: 'ERROR', blocker_ids: [], note_count: 0, summary: '', latency_ms: outcome.latency_ms }
-          if (outcome.timeout) {
-            cancelled = {
-              reason: 'LANE_TIMEOUT',
-              caseId: spec.caseId,
-              lane,
-              bound_ms: timeoutMs,
-              elapsed_ms: Date.now() - started,
-              bounded: true,
-            }
-            status = 'cancelled'
-          } else {
-            labErrors.push({ code: 'LANE_ERROR', caseId: spec.caseId, lane, message: failure.message })
-            status = 'lab_error'
-          }
-          break
-        }
-        const payload = outcome.value
-        const usage = normalizeUsage(payload?.usage)
-        if (usage.tokens === null) tokensKnown = false
-        else totalTokens += usage.tokens
-        if (usage.cost_usd === null) costKnown = false
-        else totalCost += usage.cost_usd
-        models[lane] = { model: payload?.model ?? route.model, version: payload?.version ?? 'unknown' }
-        const rawResult = payload?.result
-        let rawText = ''
-        try {
-          rawText = JSON.stringify(rawResult)
-        } catch {
-          rawText = ''
-        }
-        if (rawText.includes(sentinel)) {
-          labErrors.push({ code: 'LIVE_SENTINEL_LEAK', caseId: spec.caseId, lane, files: ['<lane-output>'] })
-          status = 'lab_error'
-          break outer
-        }
-        const hits = await scanForSentinel(join(scratchRoot, spec.caseId), sentinel)
-        if (hits.length > 0) {
-          labErrors.push({ code: 'LIVE_SENTINEL_LEAK', caseId: spec.caseId, lane, files: hits })
-          status = 'lab_error'
-          break outer
-        }
-        const checked = validateReviewResult(rawResult, binding)
-        if (!checked.ok) {
-          labErrors.push({ code: 'LANE_RESULT_INVALID', caseId: spec.caseId, lane, message: JSON.stringify(checked.diagnostics) })
-          caseReport.failures.push({ code: 'LANE_RESULT_INVALID', path: spec.caseId + '.' + lane, message: JSON.stringify(checked.diagnostics) })
-          caseReport.lanes[lane] = { complete: false, valid: false, verdict: 'INVALID', blocker_ids: [], note_count: 0, summary: '', latency_ms: outcome.latency_ms }
-          status = 'lab_error'
-          break outer
-        }
-        caseReport.lanes[lane] = {
-          complete: true,
-          valid: true,
-          verdict: checked.value.verdict,
-          blocker_ids: sorted(checked.value.blockers.map(blocker => blocker.id)),
-          note_count: checked.value.notes.length,
-          summary: maskString(checked.value.summary, mask),
-          route: { provider: route.provider, model: route.model },
-          model: payload?.model ?? route.model,
-          version: payload?.version ?? 'unknown',
-          usage,
-          latency_ms: outcome.latency_ms,
-        }
-        if (totalTokens > auth.maxTokens) {
-          budgetExhausted = true
-          status = 'budget_exhausted'
-          break outer
-        }
+      if (side.tokensKnown && side.tokens > auth.maxTokens) {
+        budgetExhausted = true
+        status = 'budget_exhausted'
+        break
       }
-      if (cancelled !== null || status !== 'complete' || budgetExhausted) break
-      const lanes = caseReport.lanes
-      if (lanes.practical?.valid === true && lanes.adversarial?.valid === true) {
-        caseReport.complete = true
-        caseReport.arms = caseArms({
-          classification: spec.classification,
-          spec,
-          actualLanes: lanes,
-          mode: 'live',
-          laneLatency: { practical: lanes.practical.latency_ms, adversarial: lanes.adversarial.latency_ms },
-        })
+      if (!caseReport.complete && status === 'complete') {
+        status = 'incomplete'
+        break
       }
     }
   } catch (error) {
@@ -1341,17 +1583,25 @@ export async function runLive(options = {}) {
   }
   const completedCases = liveCases.filter(entry => entry.complete === true)
   const complete = status === 'complete' && liveCases.length === specs.length && completedCases.length === specs.length && labErrors.length === 0 && scratchRemoved
-  const metrics = liveArmMetrics(completedCases)
+  const metrics = applyGroupMetrics(metricsFor(completedCases, 'live'))
   const usage = {
-    tokens: tokensKnown && calls > 0 ? totalTokens : 'unknown',
-    cost_usd: costKnown && calls > 0 ? totalCost : 'unknown',
-    latency_ms: calls > 0 ? latencyTotal : 0,
+    tokens: side.tokensKnown && calls > 0 ? side.tokens : 'unknown',
+    cost_usd: side.costKnown && calls > 0 ? side.cost : 'unknown',
+    latency_ms: calls > 0 ? side.latency : 0,
   }
-  const liveQuality = complete ? { status: 'measured', measured_cases: completedCases.length, metrics } : 'not_measured'
+  const approvals = {
+    approved: completedCases.filter(entry => entry.coordinator.approval.approved === true).length,
+    rejected: completedCases.filter(entry => entry.coordinator.approval.approved !== true).length,
+  }
+  const liveQuality = complete
+    ? { status: 'measured', measured_cases: completedCases.length, metrics, approvals }
+    : 'not_measured'
+  const firstFailure = liveCases.flatMap(entry => entry.failures)[0] ?? null
+  const networkAttempts = typeof startActivations.networkAttempts === 'number' ? startActivations.networkAttempts : 0
   const report = {
     schema: EVAL_SCHEMA,
     mode: 'live',
-    status: cancelled !== null ? 'cancelled' : status,
+    status: status,
     complete,
     mechanism_passed: complete,
     live_quality: liveQuality,
@@ -1363,30 +1613,39 @@ export async function runLive(options = {}) {
       mode: 'live',
       cost: usage.cost_usd,
     },
-    error: labErrors.length > 0 ? labErrors[0] : null,
+    mechanism: {
+      coordinator: 'lib/review-coordinator.js',
+      preflight: 'lib/review-transport.js',
+      store: 'lib/review-store.js',
+      input: 'lib/review-input.js',
+      lint: 'lib/review-lint.js',
+    },
+    error: labErrors[0] ?? firstFailure,
     authorization: authorizationSummary(auth),
     requests: calls,
-    model_starts: modelStarts,
-    network_attempts: typeof liveTransport.networkAttempts === 'number' ? liveTransport.networkAttempts : 0,
+    transport_calls: transportCalls,
+    model_starts: calls,
+    network_attempts: networkAttempts,
     cases: liveCases,
     structural: structuralSummary(liveCases),
-    groups: grouping(metricsFor(completedCases, 'live')),
+    groups: grouping(metricsFor(liveCases, 'live')),
     metrics,
     usage,
     budget: {
       max_calls: auth.maxCalls,
       max_tokens: auth.maxTokens,
       calls,
-      tokens: tokensKnown ? totalTokens : 'unknown',
+      tokens: side.tokensKnown ? side.tokens : 'unknown',
       exhausted: budgetExhausted,
     },
     cancellation: cancelled,
     lab_errors: labErrors,
     cleanup: { scratch_created: true, workspaces, scratch_removed: scratchRemoved },
     resume,
-    models,
+    models: side.models,
+    approvals,
   }
-  const finalReport = maskSecrets(report, mask)
+  const finalReport = finalizeReport(report, { secrets: mask, roots: [output, scratchRoot, corpus, manifestFile, REPO_ROOT] })
   const written = await writeReport(output, 'live_report.json', finalReport)
   const exitCode = cancelled !== null
     ? EXIT_CODES.live_cancelled

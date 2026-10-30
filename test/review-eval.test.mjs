@@ -38,6 +38,7 @@ import {
   sha256,
   truthLaneResult,
 } from '../qa/review-eval.mjs'
+import { REVIEW_LANES } from '../lib/review-protocol.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
@@ -79,28 +80,85 @@ async function writeBudget(dir, overrides = {}) {
   return file
 }
 
-function liveTransport(options = {}) {
-  const { summaryFor, writeSentinel = false, hang = false } = options
-  return async ({ caseId, lane, planSha, roundId, launchId, workspace, signal }) => {
-    if (hang) {
-      // Deliberately ignores the abort signal: the runner must bound the wait itself.
-      return new Promise(() => {})
-    }
-    const spec = specById.get(caseId)
-    assert.ok(spec, 'unknown fixture ' + caseId)
-    if (writeSentinel) await fs.writeFile(join(workspace, 'leaked-sentinel.txt'), SENTINEL, 'utf8')
-    const result = truthLaneResult(spec, lane, planSha)
-    result.roundId = roundId
-    result.launchId = launchId
-    result.summary = summaryFor === undefined ? result.summary : summaryFor(result, { caseId, lane })
+/**
+ * A scripted native activation transport for the real coordinator. It reserves
+ * the coordinator's budget, emits both pre-bound lane handles with synthetic run
+ * identities, and resolves valid protocol results bound to the runner's round and
+ * launch. No model or network is involved.
+ */
+function scriptedActivations(options = {}) {
+  const { summaryFor, writeSentinel = false, hangCase = null, resultFor } = options
+  const calls = []
+  async function startActivations(request) {
+    const ctx = request.eval
+    assert.ok(ctx && ctx.caseId, 'the runner must attach one eval context')
+    calls.push({ caseId: ctx.caseId, childIds: { ...request.childIds } })
+    request.budget.reserve(2)
+    if (writeSentinel) await fs.writeFile(join(ctx.workspace, 'leaked-sentinel.txt'), SENTINEL, 'utf8')
+    const spec = specById.get(ctx.caseId)
+    assert.ok(spec, 'unknown fixture ' + ctx.caseId)
+    const lanes = REVIEW_LANES.map(lane => {
+      const childId = request.childIds[lane]
+      const runId = 'run-' + ctx.caseId + '-' + lane
+      let resultPromise
+      if (ctx.caseId === hangCase) {
+        resultPromise = new Promise(() => {})
+      } else {
+        const base = typeof resultFor === 'function' ? resultFor({ spec, lane, ctx }) : truthLaneResult(spec, lane, ctx.planSha)
+        const result = { ...base, lane, roundId: ctx.roundId, launchId: ctx.launchId, planSha256: ctx.planSha }
+        result.summary = summaryFor === undefined ? result.summary : summaryFor(result, ctx)
+        ctx.record(lane, {
+          model: 'fake-' + lane,
+          version: 'test-1',
+          usage: { tokens: 10, cost_usd: 0.001 },
+          latency_ms: 1,
+        })
+        resultPromise = Promise.resolve(result)
+      }
+      resultPromise.catch(() => {})
+      return {
+        lane,
+        childId,
+        expectedChildId: childId,
+        messageId: 'msg-' + ctx.caseId + '-' + lane,
+        preset: 'ulw-plan-review-' + lane,
+        runId,
+        route: request.config.lanes[lane],
+        result: resultPromise,
+        dispose: async () => {},
+      }
+    })
     return {
-      result,
-      model: 'fake-' + lane,
-      version: 'test-1',
-      usage: { tokens: 10, cost_usd: 0.001 },
-      latency_ms: 1,
+      provider: 'spawn',
+      lanes,
+      budget: { reserved: 2, released: 0, consumed: 2 },
+      runs: {
+        snapshot: () => ({
+          lanes: lanes.map(lane => ({ lane: lane.lane, childId: lane.childId, runId: lane.runId, started: true, ended: false })),
+          unmatchedStarts: [],
+          unmatchedEnds: [],
+          conflicts: [],
+        }),
+      },
+      releaseObservers: () => {},
+      dispose: async () => {},
     }
   }
+  return { startActivations, calls }
+}
+
+function assertReportDigest(report) {
+  const { report_sha256, ...withoutDigest } = report
+  assert.match(report_sha256, /^[a-f0-9]{64}$/)
+  assert.equal(report_sha256, sha256(JSON.stringify(withoutDigest)))
+}
+
+function assertNoAbsolutePaths(report, ...needles) {
+  const text = JSON.stringify(report)
+  for (const needle of needles) assert.ok(!text.includes(needle), 'report leaked path ' + needle)
+  assert.ok(!text.includes('/home/'), 'report leaked an absolute home path')
+  assert.ok(!text.includes('/tmp/'), 'report leaked an absolute temporary path')
+  assert.ok(!/[A-Za-z]:\\\\/.test(text), 'report leaked a Windows absolute path')
 }
 
 function childEnv(extra = {}, withKey = false) {
@@ -262,16 +320,19 @@ test('unauthorized live exits nonzero, reports not_measured and never attempts t
     assert.equal(report.authorization.granted, false, entry.label)
     assert.ok(['LIVE_AUTH_REQUIRED', 'INVALID_AUTHORIZATION'].includes(report.authorization.code), entry.label)
     assert.equal(report.cleanup.scratch_removed, true, entry.label + ': unauthorized run still cleans up')
+    assertReportDigest(report)
+    assertNoAbsolutePaths(report, entry.dir)
     assert.deepEqual((await fs.readdir(entry.out)).sort(), ['live_report.json'], entry.label)
   }
   for (const entry of cases) await fs.rm(entry.dir, { recursive: true, force: true })
 })
 
-test('authorized live masks secrets, records measured metrics and removes every scratch workspace', async () => {
-  const dir = await makeTemp('ulw-eval-live-ok-')
+test('live mode is the coordinator pipeline: a lint-invalid fixture is refused before transport', async () => {
+  const dir = await makeTemp('ulw-eval-live-lint-refused-')
   const out = join(dir, 'out')
   try {
-    const budget = await writeBudget(dir, { callBudget: 2, fixtures: ['clean-new-file'] })
+    const budget = await writeBudget(dir, { callBudget: 2, fixtures: ['bad-missing-reference'] })
+    const scripted = scriptedActivations()
     const result = await runLive({
       manifestPath: MANIFEST_PATH,
       corpusDir: CORPUS_DIR,
@@ -280,17 +341,82 @@ test('authorized live masks secrets, records measured metrics and removes every 
       authorizeLive: true,
       env: { [KEY_ENV]: API_KEY },
       timeoutMs: 2000,
-      transport: liveTransport({ summaryFor: () => 'reviewer used key ' + API_KEY + ' for this run' }),
+      startActivations: scripted.startActivations,
+    })
+    assert.equal(result.exitCode, EXIT_CODES.live_lab_error)
+    assert.equal(scripted.calls.length, 0, 'lint-invalid fixture must never invoke the activation transport')
+    assert.equal(result.report.complete, false)
+    assert.equal(result.report.mechanism_passed, false)
+    assert.equal(result.report.live_quality, 'not_measured')
+    assert.equal(result.report.requests, 0)
+    assert.equal(result.report.model_starts, 0)
+    assert.equal(result.report.transport_calls, 0)
+    assert.equal(result.report.mechanism.coordinator, 'lib/review-coordinator.js')
+    const entry = result.report.cases.find(item => item.caseId === 'bad-missing-reference')
+    assert.equal(entry.complete, false)
+    assert.equal(entry.coordinator.start.code, 'LINT_FAILED')
+    assert.equal(entry.coordinator.start.ok, false)
+    assert.equal(entry.expected.structural.valid, false)
+    assert.equal(entry.actual.structural.valid, false)
+    assert.equal(entry.actual.structural.matches_expected, true)
+    assert.equal(result.report.structural.expected_invalid, 1)
+    assert.equal(result.report.structural.actual_invalid, 1)
+    assert.equal(result.report.structural.matched, 1)
+    assert.equal(result.report.structural.mismatched, 0)
+    assert.ok(entry.failures.some(failure => failure.code === 'LINT_FAILED'))
+    assertReportDigest(result.report)
+    assertNoAbsolutePaths(result.report, dir, out)
+    assert.deepEqual((await fs.readdir(out)).sort(), ['live_report.json'])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('valid live fixture drives coordinator require/start/wait with coordinator receipts and approval', async () => {
+  const dir = await makeTemp('ulw-eval-live-coordinator-')
+  const out = join(dir, 'out')
+  try {
+    const budget = await writeBudget(dir, { callBudget: 2, fixtures: ['clean-new-file'] })
+    const scripted = scriptedActivations({ summaryFor: () => 'reviewer used key ' + API_KEY + ' for this run' })
+    const result = await runLive({
+      manifestPath: MANIFEST_PATH,
+      corpusDir: CORPUS_DIR,
+      outDir: out,
+      authorizationFile: budget,
+      authorizeLive: true,
+      env: { [KEY_ENV]: API_KEY },
+      timeoutMs: 2000,
+      startActivations: scripted.startActivations,
     })
     assert.equal(result.exitCode, EXIT_CODES.ok, JSON.stringify(result.report.lab_errors))
     assert.equal(result.report.complete, true)
     assert.equal(result.report.mechanism_passed, true)
     assert.equal(result.report.live_quality.status, 'measured')
     assert.equal(result.report.live_quality.measured_cases, 1)
-    assert.equal(result.report.metrics.overall.dual.calls, 2)
-    assert.equal(result.report.metrics.overall.dual.model_starts, 2)
+    assert.equal(scripted.calls.length, 1)
+    assert.equal(result.report.transport_calls, 1)
     assert.equal(result.report.requests, 2)
     assert.equal(result.report.model_starts, 2)
+    assert.equal(result.report.mechanism.coordinator, 'lib/review-coordinator.js')
+    assert.equal(result.report.mechanism.preflight, 'lib/review-transport.js')
+    assert.equal(result.report.mechanism.store, 'lib/review-store.js')
+    const entry = result.report.cases.find(item => item.caseId === 'clean-new-file')
+    assert.equal(entry.complete, true)
+    assert.equal(entry.coordinator.require.outcome, 'required')
+    assert.equal(entry.coordinator.start.outcome, 'started')
+    assert.equal(entry.coordinator.wait.outcome, 'approved')
+    assert.equal(entry.coordinator.approval.approved, true)
+    assert.equal(entry.coordinator.state, 'approved')
+    assert.match(entry.coordinator.receipts.practical.resultSha256, /^[a-f0-9]{64}$/)
+    assert.equal(entry.coordinator.receipts.practical.verdict, 'OKAY')
+    assert.equal(entry.coordinator.receipts.adversarial.verdict, 'OKAY')
+    assert.equal(entry.actual.structural.valid, true)
+    assert.equal(entry.actual.structural.matches_expected, true)
+    assert.equal(result.report.structural.expected_invalid, 0)
+    assert.equal(result.report.structural.actual_invalid, 0)
+    assert.equal(result.report.structural.matched, 1)
+    assert.equal(result.report.structural.mismatched, 0)
+    assert.equal(result.report.metrics.overall.dual.calls, 2)
     assert.equal(result.report.metrics.overall.dual.clean_false_rejects, 0)
     assert.equal(result.report.usage.tokens, 20)
     assert.equal(result.report.usage.cost_usd, 0.002)
@@ -302,6 +428,8 @@ test('authorized live masks secrets, records measured metrics and removes every 
     const bytes = await fs.readFile(join(out, 'live_report.json'), 'utf8')
     assert.ok(!bytes.includes(API_KEY), 'live report leaked the configured key')
     assert.match(bytes, /\[REDACTED\]/, 'secret output was not masked')
+    assertReportDigest(result.report)
+    assertNoAbsolutePaths(result.report, dir, out)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -312,6 +440,7 @@ test('live sentinel in a workspace is a lab_error, never a measured score', asyn
   const out = join(dir, 'out')
   try {
     const budget = await writeBudget(dir, { callBudget: 2, fixtures: ['bad-fake-okay'] })
+    const scripted = scriptedActivations({ writeSentinel: true })
     const result = await runLive({
       manifestPath: MANIFEST_PATH,
       corpusDir: CORPUS_DIR,
@@ -321,12 +450,14 @@ test('live sentinel in a workspace is a lab_error, never a measured score', asyn
       env: { [KEY_ENV]: API_KEY },
       sentinel: SENTINEL,
       timeoutMs: 2000,
-      transport: liveTransport({ writeSentinel: true }),
+      startActivations: scripted.startActivations,
     })
     assert.equal(result.exitCode, EXIT_CODES.live_lab_error)
     assert.equal(result.report.complete, false)
     assert.equal(result.report.mechanism_passed, false)
     assert.equal(result.report.live_quality, 'not_measured')
+    assert.equal(result.report.requests, 2)
+    assert.equal(result.report.transport_calls, 1)
     assert.equal(result.report.lab_errors.length, 1)
     assert.equal(result.report.lab_errors[0].code, 'LIVE_SENTINEL_LEAK')
     assert.equal(result.report.lab_errors[0].caseId, 'bad-fake-okay')
@@ -334,12 +465,14 @@ test('live sentinel in a workspace is a lab_error, never a measured score', asyn
     assert.deepEqual((await fs.readdir(out)).sort(), ['live_report.json'])
     const bytes = await fs.readFile(join(out, 'live_report.json'), 'utf8')
     assert.ok(!bytes.includes(SENTINEL), 'report leaked the sentinel value')
+    assertReportDigest(result.report)
+    assertNoAbsolutePaths(result.report, dir, out)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('cancel_resume: hung live lane is bounded, partial data survives and the resume is fresh', async () => {
+test('cancel_resume: hung live wait is bounded, partial data survives and the resume is fresh', async () => {
   const dir = await makeTemp('ulw-eval-live-cancel-')
   const out = join(dir, 'out')
   try {
@@ -356,10 +489,10 @@ test('cancel_resume: hung live lane is bounded, partial data survives and the re
     const started = Date.now()
     const cancelled = await runLive({
       ...options,
-      transport: async args => args.caseId === 'bad-fake-okay' ? new Promise(() => {}) : liveTransport()(args),
+      startActivations: scriptedActivations({ hangCase: 'bad-fake-okay' }).startActivations,
     })
     const elapsed = Date.now() - started
-    assert.ok(elapsed < 2000, 'hung lane was not cancelled within the bound: ' + elapsed + 'ms')
+    assert.ok(elapsed < 2000, 'hung live wait was not cancelled within the bound: ' + elapsed + 'ms')
     assert.equal(cancelled.exitCode, EXIT_CODES.live_cancelled)
     assert.equal(cancelled.report.complete, false)
     assert.equal(cancelled.report.status, 'cancelled')
@@ -369,6 +502,8 @@ test('cancel_resume: hung live lane is bounded, partial data survives and the re
     assert.equal(cancelled.report.cleanup.scratch_removed, true)
     assert.deepEqual((await fs.readdir(out)).sort(), ['live_report.json'])
     const partial = await readJson(join(out, 'live_report.json'))
+    assertReportDigest(partial)
+    assertNoAbsolutePaths(partial, dir, out)
     assert.equal(partial.complete, false)
     assert.equal(partial.resume.detected_partial, false)
     assert.equal(partial.cases.length, 2)
@@ -378,7 +513,7 @@ test('cancel_resume: hung live lane is bounded, partial data survives and the re
     const resumed = await runLive({
       ...options,
       timeoutMs: 2000,
-      transport: liveTransport(),
+      startActivations: scriptedActivations().startActivations,
     })
     assert.equal(resumed.exitCode, EXIT_CODES.ok)
     assert.equal(resumed.report.complete, true)
@@ -390,9 +525,51 @@ test('cancel_resume: hung live lane is bounded, partial data survives and the re
     assert.equal(resumed.report.cleanup.scratch_removed, true)
     assert.deepEqual((await fs.readdir(out)).sort(), ['live_report.json'])
     const complete = await readJson(join(out, 'live_report.json'))
+    assertReportDigest(complete)
     assert.equal(complete.complete, true)
     assert.equal(complete.cases.length, 2)
     assert.ok(complete.cases.every(entry => entry.complete === true))
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unauthorized rerun preserves a previous partial report and adds a digest-bearing auth failure report', async () => {
+  const dir = await makeTemp('ulw-eval-live-preserve-')
+  const out = join(dir, 'out')
+  try {
+    const budget = await writeBudget(dir, { callBudget: 4, fixtures: ['clean-new-file', 'bad-fake-okay'] })
+    const partialRun = await runLive({
+      manifestPath: MANIFEST_PATH,
+      corpusDir: CORPUS_DIR,
+      outDir: out,
+      authorizationFile: budget,
+      authorizeLive: true,
+      env: { [KEY_ENV]: API_KEY },
+      timeoutMs: 40,
+      startActivations: scriptedActivations({ hangCase: 'bad-fake-okay' }).startActivations,
+    })
+    assert.equal(partialRun.exitCode, EXIT_CODES.live_cancelled)
+    const partialBytes = await fs.readFile(join(out, 'live_report.json'), 'utf8')
+    const unauthorized = await runLive({
+      manifestPath: MANIFEST_PATH,
+      corpusDir: CORPUS_DIR,
+      outDir: out,
+      authorizationFile: budget,
+      authorizeLive: false,
+      env: {},
+      timeoutMs: 40,
+      startActivations: scriptedActivations().startActivations,
+    })
+    assert.equal(unauthorized.exitCode, EXIT_CODES.live_auth_required)
+    const afterBytes = await fs.readFile(join(out, 'live_report.json'), 'utf8')
+    assert.equal(afterBytes, partialBytes, 'unauthorized rerun overwrote previous partial data')
+    const authReport = await readJson(join(out, 'live_report.auth_failed.json'))
+    assertReportDigest(authReport)
+    assert.equal(authReport.cases.length, 0)
+    assert.equal(authReport.authorization.granted, false)
+    assert.equal(authReport.requests, 0)
+    assert.deepEqual((await fs.readdir(out)).sort(), ['live_report.auth_failed.json', 'live_report.json'])
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -409,6 +586,8 @@ test('adversarial probes stay observable and offline', async t => {
       assert.equal(replay.report.error.code, 'MANIFEST_MALFORMED')
       assert.equal(replay.report.mechanism_passed, false)
       assert.equal(replay.report.live_quality, 'not_measured')
+      assertReportDigest(replay.report)
+      assertNoAbsolutePaths(replay.report, dir, join(dir, 'replay-out'))
       assert.deepEqual((await fs.readdir(join(dir, 'replay-out'))).sort(), ['replay_report.json'])
 
       const badBudget = join(dir, 'budget.json')
@@ -426,6 +605,8 @@ test('adversarial probes stay observable and offline', async t => {
       assert.equal(live.report.requests, 0)
       assert.equal(live.report.network_attempts, 0)
       assert.equal(live.report.live_quality, 'not_measured')
+      assertReportDigest(live.report)
+      assertNoAbsolutePaths(live.report, dir, join(dir, 'live-out'))
 
       const badShape = structuredClone(manifest)
       badShape.cases.find(entry => entry.classification === 'bad').expected.blockers[0].location = null
@@ -434,6 +615,8 @@ test('adversarial probes stay observable and offline', async t => {
       const shape = await runReplay({ manifestPath: badShapeFile, corpusDir: CORPUS_DIR, outDir: join(dir, 'shape-out') })
       assert.equal(shape.exitCode, EXIT_CODES.replay_failed)
       assert.equal(shape.report.error.code, 'MANIFEST_INVALID')
+      assertReportDigest(shape.report)
+      assertNoAbsolutePaths(shape.report, dir, join(dir, 'shape-out'))
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
@@ -451,7 +634,7 @@ test('adversarial probes stay observable and offline', async t => {
         authorizeLive: true,
         env: { [KEY_ENV]: API_KEY },
         timeoutMs: 2000,
-        transport: liveTransport(),
+        startActivations: scriptedActivations().startActivations,
       })
       assert.equal(partial.exitCode, EXIT_CODES.live_budget_exhausted)
       assert.equal(partial.report.complete, false)
@@ -461,7 +644,10 @@ test('adversarial probes stay observable and offline', async t => {
       assert.equal(partial.report.budget.calls, 2)
       assert.equal(partial.report.cases.length, 1)
       assert.equal(partial.report.cases[0].complete, true)
+      assert.equal(partial.report.transport_calls, 1)
       assert.equal(partial.report.cleanup.scratch_removed, true)
+      assertReportDigest(partial.report)
+      assertNoAbsolutePaths(partial.report, dir, join(dir, 'partial'))
       assert.deepEqual((await fs.readdir(join(dir, 'partial'))).sort(), ['live_report.json'])
 
       const unknown = await writeBudget(dir, { callBudget: 4, fixtures: ['clean-new-file', 'case-that-does-not-exist'] })
@@ -473,7 +659,7 @@ test('adversarial probes stay observable and offline', async t => {
         authorizeLive: true,
         env: { [KEY_ENV]: API_KEY },
         timeoutMs: 2000,
-        transport: liveTransport(),
+        startActivations: scriptedActivations().startActivations,
       })
       assert.equal(missing.exitCode, EXIT_CODES.live_lab_error)
       assert.equal(missing.report.complete, false)
@@ -482,8 +668,10 @@ test('adversarial probes stay observable and offline', async t => {
       assert.equal(missing.report.requests, 0)
       assert.equal(missing.report.model_starts, 0)
       assert.equal(missing.report.cleanup.scratch_removed, true)
+      assertReportDigest(missing.report)
+      assertNoAbsolutePaths(missing.report, dir, join(dir, 'missing'))
 
-      const oneLane = await writeBudget(dir, { callBudget: 2, fixtures: ['clean-new-file'] })
+      const oneLane = await writeBudget(dir, { callBudget: 2, fixtures: ['bad-fake-okay'] })
       const incomplete = await runLive({
         manifestPath: MANIFEST_PATH,
         corpusDir: CORPUS_DIR,
@@ -492,15 +680,21 @@ test('adversarial probes stay observable and offline', async t => {
         authorizeLive: true,
         env: { [KEY_ENV]: API_KEY },
         timeoutMs: 2000,
-        transport: async args => args.lane === 'adversarial'
-          ? { result: { version: 1, lane: 'adversarial' }, model: 'fake', version: 'test-1', usage: { tokens: 1, cost_usd: 0.001 }, latency_ms: 1 }
-          : liveTransport()(args),
+        startActivations: scriptedActivations({
+          resultFor: ({ spec, lane, ctx }) => {
+            const result = truthLaneResult(spec, lane, ctx.planSha)
+            if (lane === 'adversarial') result.verdict = 'OKAY'
+            return result
+          },
+        }).startActivations,
       })
       assert.equal(incomplete.exitCode, EXIT_CODES.live_lab_error)
       assert.equal(incomplete.report.complete, false)
       assert.equal(incomplete.report.live_quality, 'not_measured')
-      assert.equal(incomplete.report.lab_errors[0].code, 'LANE_RESULT_INVALID')
+      assert.equal(incomplete.report.cases[0].coordinator.wait.outcome, 'inconclusive')
       assert.equal(incomplete.report.cleanup.scratch_removed, true)
+      assertReportDigest(incomplete.report)
+      assertNoAbsolutePaths(incomplete.report, dir, join(dir, 'one-lane'))
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
@@ -517,6 +711,8 @@ test('adversarial probes stay observable and offline', async t => {
       assert.equal(result.exitCode, EXIT_CODES.replay_failed)
       assert.equal(result.report.mechanism_passed, false)
       assert.equal(result.report.live_quality, 'not_measured')
+      assertReportDigest(result.report)
+      assertNoAbsolutePaths(result.report, dir, join(dir, 'out'))
       const entry = result.report.cases.find(item => item.caseId === stale.cases[0].caseId)
       assert.equal(entry.passed, false)
       assert.ok(entry.failures.some(failure => failure.code === 'PLAN_SHA_MISMATCH'))
