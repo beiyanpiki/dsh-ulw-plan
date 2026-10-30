@@ -143,6 +143,29 @@ test('an ordinary plan gets an ordinary lease without starting a review', async 
   assert.equal(checked.nextAction, 'execute')
 })
 
+test('an ordinary check never invokes any review coordinator action', async t => {
+  const f = await workspacePlan(t)
+  const touched = []
+  const review = new Proxy({
+    approval() {
+      touched.push('approval')
+      return { ok: true, exists: false }
+    },
+  }, {
+    get(target, property, receiver) {
+      if (['require', 'start', 'wait', 'cancel', 'status'].includes(property)) {
+        throw new Error('the handoff started a review action: ' + String(property))
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const service = serviceFor(t, f, review)
+  const result = await service.check(check(f.target), ctx())
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.outcome, 'ordinary_lease')
+  assert.deepEqual(touched, ['approval'])
+})
+
 test('a false legacy draft flag leaves an ordinary plan ordinary', async t => {
   const f = await workspacePlan(t)
   await writeFile(join(f.workspace, '.dsh/ulw/drafts/demo.md'), '---\nslug: demo\nreview_required: false\n---\n# Draft\n')
@@ -303,6 +326,19 @@ test('a trusted policy mismatch blocks a required lease', async t => {
   denied(await service.check(check(f.target), ctx()), 'HANDOFF_POLICY_MISMATCH', 'review')
 })
 
+test('a required lease fails closed when the policy cannot be compared', async t => {
+  const f = await workspacePlan(t)
+  const review = reviewDouble(approvalFor(f.text))
+  const unbound = serviceFor(t, f, review, { policySha256: undefined })
+  denied(await unbound.check(check(f.target), ctx()), 'HANDOFF_POLICY_UNBOUND', 'review')
+  const missing = reviewDouble(approvalFor(f.text, { policy: {} }))
+  denied(await serviceFor(t, f, missing).check(check(f.target), ctx()), 'HANDOFF_POLICY_MISMATCH', 'review')
+  const matching = reviewDouble(approvalFor(f.text))
+  const ok = await serviceFor(t, f, matching).check(check(f.target), ctx())
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+  assert.equal(ok.outcome, 'required_lease')
+})
+
 test('a legacy draft review_required true needs a trusted approval', async t => {
   const f = await workspacePlan(t)
   await writeFile(join(f.workspace, '.dsh/ulw/drafts/demo.md'), '---\nslug: demo\nreview_required: true\n---\n# Draft\n')
@@ -429,6 +465,50 @@ test('a direct skill or manual execute start cannot gain execute without check',
   const lease = await service.check(check(f.target), ctx())
   assert.equal(lease.ok, true)
   assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), undefined)
+})
+
+test('a decoy ordinary target cannot supersede the selected required plan', async t => {
+  const f = await workspacePlan(t)
+  await mkdir(join(f.workspace, '.dsh/ulw/plans'), { recursive: true })
+  await writeFile(join(f.workspace, OTHER), '# Other plan\n## Todos\n- [ ] 1. other\n  QA: other\n## Final verification wave\n- [ ] F1. other\n')
+  const pending = {
+    ok: true, exists: true, required: true, approved: false, state: 'in_flight', roundId: null,
+    revision: 0, nextAction: 'wait', source: { planSha256: null, instructionSha256: null },
+  }
+  const review = {
+    approval(identity) {
+      return identity.target === f.target ? pending : { ok: true, exists: false }
+    },
+  }
+  const service = serviceFor(t, f, review)
+  denied(await service.check(check(f.target), ctx()), 'HANDOFF_NOT_APPROVED', 'wait')
+  denied(await service.check(check(OTHER), ctx()), 'HANDOFF_SELECTION_REQUIRED', 'review')
+  const agent = agentFor(f, 'author-1')
+  const guard = service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent })
+  assert.equal(typeof guard, 'string')
+  assert.match(guard, /HANDOFF_LEASE_MISSING/)
+  const state = service.stateForSession('author-1')
+  assert.equal(state.target, f.target)
+  assert.equal(state.lease, null)
+})
+
+test('a decoy ordinary target cannot replace a verified required selection', async t => {
+  const f = await workspacePlan(t)
+  await writeFile(join(f.workspace, OTHER), '# Other plan\n## Todos\n- [ ] 1. other\n  QA: other\n## Final verification wave\n- [ ] F1. other\n')
+  const review = {
+    approval(identity) {
+      return identity.target === f.target ? approvalFor(f.text) : { ok: true, exists: false }
+    },
+  }
+  const service = serviceFor(t, f, review)
+  const first = await service.check(check(f.target), ctx())
+  assert.equal(first.ok, true, JSON.stringify(first))
+  denied(await service.check(check(OTHER), ctx()), 'HANDOFF_SELECTION_REQUIRED', 'review')
+  const state = service.stateForSession('author-1')
+  assert.equal(state.target, f.target)
+  assert.equal(state.handoffId, first.handoffId)
+  assert.equal(state.required, true)
+  assert.equal(state.lease.approvedRoundId, 'round-1')
 })
 
 test('review is closed only during an active execute lease', async t => {

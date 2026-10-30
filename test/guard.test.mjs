@@ -129,10 +129,17 @@ test('with a handoff service a fresh execute session cannot write before check',
   }
   assert.equal(guard(f.callFor('read', 'src/main.ts')), undefined)
   assert.equal(guard(f.callFor('write', '.dsh/ulw/plans/gate.md')), undefined)
+  // The tools that can open the gate must stay available before the lease.
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(guard(f.callFor(name, undefined)), undefined, name)
+  }
   // A direct skill load only records execute intent; the lease gate stays shut.
   assert.equal(typeof guard(f.callFor('write', 'src/main.ts')), 'string')
   await f.authorize()
   assert.equal(guard(f.callFor('write', 'src/main.ts')), undefined)
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(guard(f.callFor(name, undefined)), undefined, name + ' after lease')
+  }
 })
 
 test('a required plan without a verified lease refuses product writes, shell and spawns', async t => {
@@ -152,6 +159,9 @@ test('a required plan without a verified lease refuses product writes, shell and
   }
   for (const name of ['read', 'glob', 'grep', 'todo_write', 'ask_user_question']) {
     assert.equal(guard(f.callFor(name, 'src/main.ts')), undefined, name)
+  }
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(guard(f.callFor(name, undefined)), undefined, name)
   }
   assert.equal(guard(f.callFor('write', '.dsh/ulw/plans/gate.md')), undefined)
   assert.equal(guard(f.callFor('edit', '.dsh/ulw/drafts/gate.md')), undefined)
