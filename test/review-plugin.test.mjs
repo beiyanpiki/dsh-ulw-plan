@@ -1244,6 +1244,7 @@ test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed
   const failures = [
     { name: 'throwing', handoff: { stateForSession() { throw new Error('handoff lease storage unavailable') } } },
     { name: 'asynchronous', handoff: { async stateForSession() { return { status: 'leased', lease: { handoffId: 'forged' } } } } },
+    { name: 'rejecting', handoff: { stateForSession() { return Promise.reject(new Error('handoff lease storage unavailable')) } } },
   ]
   try {
     for (const failure of failures) {
@@ -1265,7 +1266,7 @@ test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed
       assert.equal(host.followups.length, 0, failure.name + ' injects no followup')
     }
     assert.equal(Object.keys(host.medium.plans).length, 0, 'a failed lookup never creates a review record')
-    t.diagnostic('fail-closed lookup: throwing+asynchronous => CAPABILITY_UNAVAILABLE, zero rounds, zero followups')
+    t.diagnostic('fail-closed lookup: throwing+asynchronous+rejecting => CAPABILITY_UNAVAILABLE, zero rounds, zero followups')
   } finally {
     host.ctx.handoff = authority
   }
