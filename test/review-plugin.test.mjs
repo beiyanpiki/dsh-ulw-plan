@@ -15,6 +15,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
+import { handoffAuthorityOf, setHandoffAuthority } from '../lib/commands.js'
 import { apply } from '../lib/index.js'
 
 const target = '.dsh/ulw/plans/cordis-dual-plan-review.md'
@@ -96,6 +97,36 @@ function createWorkspace() {
   mkdirSync(join(workspace, '.dsh', 'ulw', 'plans'), { recursive: true })
   writeFileSync(join(workspace, target), VALID_PLAN)
   return workspace
+}
+
+/**
+ * A Cordis-shaped proxy over the plain fake context (ULW row 36).
+ *
+ * The installed Cordis 4 reflect service traps an undeclared property read with
+ * `cannot get property "<name>" without inject` and an undeclared write with
+ * `cannot set property "<name>" without provide`; only properties that exist
+ * on the target (declared accessors, injected services, the context's own
+ * methods) are transparent. Symbols, `then`, numeric keys and `_`-prefixed
+ * keys pass through (reflect.ts's isSpecialProperty). This is the shape that
+ * made a plain `ctx.handoff` injection inert on the real Host.
+ */
+function cordisContextProxy(target) {
+  const special = (prop) => {
+    const name = String(prop)
+    return typeof prop === 'symbol' || name === 'prototype' || name === 'then' ||
+      name.startsWith('_') || String(parseInt(name, 10)) === name
+  }
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      if (special(prop) || Reflect.has(obj, prop)) return Reflect.get(obj, prop, receiver)
+      throw new Error('cannot get property "' + String(prop) + '" without inject')
+    },
+    set(obj, prop, value, receiver) {
+      if (special(prop) || Reflect.has(obj, prop)) return Reflect.set(obj, prop, value, receiver)
+      throw new Error('cannot set property "' + String(prop) + '" without provide')
+    },
+    has(obj, prop) { return Reflect.has(obj, prop) },
+  })
 }
 
 function createHost(options = {}) {
@@ -379,6 +410,9 @@ function createHost(options = {}) {
     session: { id: childId, header: { cwd: workspace } },
     ctx: { preset: host.childPresets.get(childId) },
   })
+  // The proxy is installed last so every service registration above closes
+  // over the proxy the plugin will actually be applied to.
+  if (options.proxy === true) host.ctx = cordisContextProxy(host.ctx)
   return host
 }
 
@@ -1239,8 +1273,9 @@ test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed
   const host = createHost({ mode: 'execute' })
   await apply(host.ctx, rawConfig())
   await flush()
-  const authority = host.ctx.handoff
-  assert.ok(authority, 'the review sub-effect injected the handoff authority')
+  const authority = handoffAuthorityOf(host.ctx)
+  assert.ok(authority, 'the review sub-effect declared the handoff authority on the seam')
+  assert.equal(host.ctx.handoff, authority, 'a plain-object Host still sees the legacy mirror')
   const failures = [
     { name: 'throwing', handoff: { stateForSession() { throw new Error('handoff lease storage unavailable') } } },
     { name: 'asynchronous', handoff: { async stateForSession() { return { status: 'leased', lease: { handoffId: 'forged' } } } } },
@@ -1248,7 +1283,9 @@ test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed
   ]
   try {
     for (const failure of failures) {
-      host.ctx.handoff = failure.handoff
+      // Replace the seam, not the plain property: the seam is what every reader
+      // resolves first (row 36), so the failure injection must go through it.
+      setHandoffAuthority(host.ctx, failure.handoff)
       for (const action of ['require', 'start']) {
         const refused = await host.invokeTool('ulw_review', { action, target })
         assert.equal(refused.ok, false, failure.name + '/' + action)
@@ -1268,7 +1305,77 @@ test('row 34 real entry: an unreadable or asynchronous lease lookup fails closed
     assert.equal(Object.keys(host.medium.plans).length, 0, 'a failed lookup never creates a review record')
     t.diagnostic('fail-closed lookup: throwing+asynchronous+rejecting => CAPABILITY_UNAVAILABLE, zero rounds, zero followups')
   } finally {
-    host.ctx.handoff = authority
+    setHandoffAuthority(host.ctx, authority)
+    assert.equal(handoffAuthorityOf(host.ctx), authority)
   }
   await host.unload()
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 36: the handoff seam on a Cordis-proxy Host
+// ---------------------------------------------------------------------------
+
+test('row 36 real entry: on a Cordis-proxy Host the assembled handoff is read by guard, tool gate and command, and dispose clears it', async (t) => {
+  const host = createHost({ mode: 'execute', proxy: true })
+
+  // The proxy reproduces both Cordis traps for the undeclared property.
+  assert.throws(() => host.ctx.handoff, /cannot get property "handoff" without inject/)
+  assert.throws(() => { host.ctx.handoff = { guard() { return 'forged' } } }, /cannot set property "handoff" without provide/)
+
+  // The real enhanced assembly still completes on proxy semantics.
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const authority = handoffAuthorityOf(host.ctx)
+  assert.ok(authority, 'the assembly declared the handoff authority on the plugin seam')
+  assert.equal(typeof authority.guard, 'function')
+  assert.equal(typeof authority.stateForSession, 'function')
+  assert.throws(() => host.ctx.handoff, /without inject/, 'the seam never becomes a plain property')
+
+  // The write guard resolves the same authority through the seam: execute mode
+  // without a lease is refused with the lease diagnostic, not a property error.
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_LEASE_MISSING/)
+  assert.match(host.guardReason(host.parent, 'bash', {}) ?? '', /HANDOFF_LEASE_MISSING/)
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(host.guardReason(host.parent, name, {}), undefined, name + ' must stay usable')
+  }
+
+  // Obtain a real lease through the real review lifecycle, then the tool gate
+  // and the slash command must refuse with the stable code.
+  const done = await approveRound(host)
+  assert.equal(done.approved, true)
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.lease.required, true)
+  assert.equal(authority.stateForSession('parent-session')?.status, 'leased', 'the seam authority is the live service')
+  assert.equal(host.guardReason(host.parent, 'write'), undefined, 'a verified lease lets the guard pass')
+
+  const startsBefore = host.startCalls
+  const refusedTool = await host.invokeTool('ulw_review', { action: 'require', target })
+  assert.equal(refusedTool.ok, false)
+  assert.equal(refusedTool.code, 'HANDOFF_ACTIVE_EXECUTE')
+  assert.equal(refusedTool.accepted, false)
+  const refusedCommand = await host.runCommand('ulw-review', target)
+  assert.equal(refusedCommand.kind, 'error')
+  assert.match(refusedCommand.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(refusedCommand.text.includes('CAPABILITY_UNAVAILABLE'), false, 'the lease refusal is not a capability diagnostic')
+  assert.equal(host.startCalls, startsBefore, 'no refusal started a reviewer pair')
+  assert.equal(host.followups.length, 0, 'no refusal injected a followup')
+
+  // Dispose clears the seam: no stale authority, no plain-property leak.
+  const staleDefinition = host.tool('ulw_review')
+  await host.unload()
+  assert.equal(handoffAuthorityOf(host.ctx), null, 'dispose cleared the seam')
+  assert.equal(authority.stateForSession('parent-session'), null, 'the disposed authority holds no lease')
+  assert.throws(() => host.ctx.handoff, /without inject/, 'no plain property mirror exists on the proxy')
+  assert.equal(host.tool('ulw_review'), undefined)
+  assert.equal(host.tool('ulw_handoff'), undefined)
+  assert.equal(host.guards.filter(Boolean).length, 0)
+  const stale = await staleDefinition.execute({ action: 'status' }, {
+    agent: host.parent,
+    callId: 'stale-call',
+    signal: new AbortController().signal,
+  })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.code, 'CAPABILITY_UNAVAILABLE')
+  t.diagnostic('cordis-proxy host: seam authority assembled, guard HANDOFF_LEASE_MISSING, tool+command HANDOFF_ACTIVE_EXECUTE, dispose seam=null')
 })

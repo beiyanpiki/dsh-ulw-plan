@@ -29,7 +29,13 @@ import {
   reviewLeaseGate,
   reviewToolDefinition,
 } from '../lib/review-tools.js'
-import { ULW_REVIEW_COMMAND, activeExecuteLease, registerCommands } from '../lib/commands.js'
+import {
+  ULW_REVIEW_COMMAND,
+  activeExecuteLease,
+  handoffAuthorityOf,
+  registerCommands,
+} from '../lib/commands.js'
+import { createGuard } from '../lib/guard.js'
 
 const TARGET = '.dsh/ulw/plans/demo.md'
 const TARGET_ABS = '/tmp/ulw-review-entry-workspace/.dsh/ulw/plans/demo.md'
@@ -115,6 +121,36 @@ function fakeCtx(services = {}) {
     },
     logger: { info() {} },
   }
+}
+
+/**
+ * A Cordis-shaped context proxy (ULW row 36).
+ *
+ * Cordis 4 contexts are proxies (installed reflect service): reading an
+ * undeclared property throws `cannot get property "<name>" without inject`
+ * and writing one throws `cannot set property "<name>" without provide`.
+ * Only a property that exists on the target (an accessor or a provided
+ * service, in the real Host) is transparent; symbols, `then`, numeric keys
+ * and `_`-prefixed keys pass through, matching reflect.ts's isSpecialProperty.
+ * Plain-object fakes hide exactly this, so the seam tests run over this proxy.
+ */
+function cordisProxy(target) {
+  const special = (prop) => {
+    const name = String(prop)
+    return typeof prop === 'symbol' || name === 'prototype' || name === 'then' ||
+      name.startsWith('_') || String(parseInt(name, 10)) === name
+  }
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      if (special(prop) || Reflect.has(obj, prop)) return Reflect.get(obj, prop, receiver)
+      throw new Error('cannot get property "' + String(prop) + '" without inject')
+    },
+    set(obj, prop, value, receiver) {
+      if (special(prop) || Reflect.has(obj, prop)) return Reflect.set(obj, prop, value, receiver)
+      throw new Error('cannot set property "' + String(prop) + '" without provide')
+    },
+    has(obj, prop) { return Reflect.has(obj, prop) },
+  })
 }
 
 function scriptedAssembly(script = {}, options = {}) {
@@ -590,6 +626,7 @@ test('a half-assembled enhanced install gates product writes and answers one cap
   const dispose = entry.start()
   await entry.ready
   assert.equal(typeof ctx.handoff?.guard, 'function', 'the failed enhanced assembly installs a refusing guard')
+  assert.equal(handoffAuthorityOf(ctx), ctx.handoff, 'a plain-object Host sees the seam through its legacy mirror')
   const writeReason = ctx.handoff.guard({
     agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
     name: 'write',
@@ -607,6 +644,59 @@ test('a half-assembled enhanced install gates product writes and answers one cap
   assert.equal(value.lease, null)
   await dispose()
   assert.equal(ctx.handoff, undefined)
+  assert.equal(handoffAuthorityOf(ctx), null, 'dispose cleared the seam as well as the mirror')
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 36: the handoff seam is declared off-context, not as a plain property
+// ---------------------------------------------------------------------------
+
+test('row 36: a Cordis-proxy context receives no plain handoff property, yet the refusing guard is installed', async () => {
+  const plain = fakeCtx({ subagents: {}, agentPresets: {}, llm: {}, storage: {} })
+  // Declared/injected Host services are transparent on a real context.
+  plain.sessionProjections = { stateOf: () => ({ mode: 'execute' }) }
+  plain.workingDirectory = { get: () => '/tmp/ws' }
+  const ctx = cordisProxy(plain)
+  // The proxy reproduces the two Cordis traps that broke the real Host.
+  assert.throws(() => ctx.handoff, /cannot get property "handoff" without inject/)
+  assert.throws(() => { ctx.handoff = { guard() { return 'forged' } } }, /cannot set property "handoff" without provide/)
+
+  // A half-assembled enhanced install must still install the refusing handoff;
+  // with the plain-property injection this promise rejected on a TypeError.
+  const entry = createReviewEntry(ctx, { config: {}, assemble: async () => null })
+  const dispose = entry.start()
+  await entry.ready
+
+  // The authority is declared on the seam; a plain read is still impossible.
+  const stub = handoffAuthorityOf(ctx)
+  assert.ok(stub, 'the failing assembly declared its refusing handoff on the seam')
+  assert.equal(typeof stub.guard, 'function')
+  assert.deepEqual(activeExecuteLease(ctx, { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } }), { known: true, active: false })
+  assert.throws(() => ctx.handoff, /cannot get property "handoff" without inject/)
+
+  const guard = createGuard(ctx)
+  const writeReason = guard({
+    agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
+    name: 'write',
+    arguments: { file_path: 'src/main.js' },
+  })
+  assert.match(writeReason ?? '', /HANDOFF_REVIEW_UNAVAILABLE/, 'the guard reads the installed refusing handoff')
+  assert.equal(guard({
+    agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
+    name: 'ulw_handoff',
+    arguments: {},
+  }), undefined, 'the recovery surface stays available')
+
+  await dispose()
+  // Dispose clears the seam: no stale authority survives, and the proxy still
+  // has no plain property to leak one.
+  assert.equal(handoffAuthorityOf(ctx), null, 'dispose cleared the refusing handoff seam')
+  assert.equal(createGuard(ctx)({
+    agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
+    name: 'write',
+    arguments: { file_path: 'src/main.js' },
+  }), undefined, 'no stale refusing authority after dispose')
+  assert.throws(() => ctx.handoff, /cannot get property "handoff" without inject/)
 })
 
 test('a second start never double-assembles or double-registers the handoff tool', async () => {

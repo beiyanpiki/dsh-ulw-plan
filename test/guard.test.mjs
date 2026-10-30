@@ -3,6 +3,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { clearHandoffAuthority, handoffAuthorityOf, setHandoffAuthority } from '../lib/commands.js'
 import { createGuard } from '../lib/guard.js'
 
 const cwd = '/ws'
@@ -52,6 +53,48 @@ test('plan mode does not gate bash or read-only tools', () => {
 
 test('an execution without an agent is never gated', () => {
   assert.equal(guardFor('plan')({ name: 'write', arguments: { file_path: 'src/main.ts' } }), undefined)
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 36: the guard reads the handoff authority through the plugin seam
+// ---------------------------------------------------------------------------
+
+test('row 36: execute mode reads the seam and contains the Cordis property traps', () => {
+  const ctx = {
+    sessionProjections: { stateOf: () => ({ mode: 'execute' }) },
+    workingDirectory: { get: () => cwd },
+  }
+  // The real Cordis get/set traps for an undeclared property.
+  Object.defineProperty(ctx, 'handoff', {
+    configurable: true,
+    get() { throw new Error('cannot get property "handoff" without inject') },
+    set() { throw new Error('cannot set property "handoff" without provide') },
+  })
+
+  const seam = { guard: (exec) => (exec.name === 'write' ? 'REFUSED_BY_SEAM' : undefined) }
+  setHandoffAuthority(ctx, seam)
+  assert.equal(handoffAuthorityOf(ctx), seam)
+  assert.equal(createGuard(ctx)(call('write', 'src/main.ts')), 'REFUSED_BY_SEAM')
+  assert.equal(createGuard(ctx)(call('read', 'src/main.ts')), undefined)
+
+  clearHandoffAuthority(ctx, seam)
+  assert.equal(handoffAuthorityOf(ctx), null)
+  // No seam on a real context is the old Host's execute behaviour: ungated,
+  // never a raw property TypeError.
+  assert.equal(createGuard(ctx)(call('write', 'src/main.ts')), undefined)
+  assert.equal(createGuard(ctx)(call('bash', undefined)), undefined)
+})
+
+test('row 36: a legacy plain-object handoff property remains the read fallback', () => {
+  const legacy = { guard: () => 'REFUSED_BY_LEGACY' }
+  const ctx = {
+    sessionProjections: { stateOf: () => ({ mode: 'execute' }) },
+    workingDirectory: { get: () => cwd },
+    handoff: legacy,
+  }
+  assert.equal(createGuard(ctx)(call('write', 'src/main.ts')), 'REFUSED_BY_LEGACY')
+  clearHandoffAuthority(ctx, legacy)
+  assert.equal(createGuard(ctx)(call('write', 'src/main.ts')), undefined)
 })
 
 // ---------------------------------------------------------------------------
