@@ -4,8 +4,10 @@
  * Everything here is a fake Host composed of the public service shapes the
  * installed plugin consumes (tools, commands, skills, sessionProjections,
  * workingDirectory, subagents, agentPresets, llm, storage) plus the real pure
- * review modules. No model, network, clock or sleep is involved: activations
- * are deferred promises the test settles explicitly.
+ * review modules. No model, network or sleep is involved in activations: they
+ * are deferred promises the test settles explicitly. The only wall-clock bound
+ * is the documented, generous wait for the assembly's child pin, which needs
+ * real disk I/O (see host.waitForPinned).
  */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -320,12 +322,50 @@ function createHost(options = {}) {
     ctx: {},
   })
   host.emitChildStart = (info, parent = host.parent) => host.emit('subagent/start', { provider: 'spawn', local: true, ...info }, parent)
-  host.waitFor = async (predicate, turns = 200) => {
-    for (let index = 0; index < turns; index += 1) {
-      if (await predicate()) return true
-      await turn()
+  /**
+   * Await the assembly's child pin, bounded by wall time instead of turns.
+   *
+   * emit('subagent/start') makes observeChild register the parent
+   * synchronously, but the child's inherited lease is delegated on a microtask
+   * that reads the plan from disk (observeChild -> service.delegate ->
+   * assertLease -> artifact capture). That registration is observable
+   * (ctx.handoff.stateForSession(childId) appears) yet it needs real I/O.
+   *
+   * A turn-count bound is not a time bound: 200 setImmediate turns elapse in
+   * ~1.5-2.5 ms on this machine while the capture alone needs ~4-5 ms, so a
+   * loaded run can exhaust the turns before the disk read completes (the
+   * witnessed delegated-child matrix flake at "actual false"). Waiting on the
+   * observable pinned state with a wall-clock bound removes that race. The
+   * bound is deliberately generous (20 s, orders of magnitude above one small
+   * file read) and a timeout reports both the observed state and the last
+   * guard reason, so a genuine pinning regression stays distinguishable from
+   * machine slowness.
+   */
+  host.waitForPinned = async (agent, handoffId, timeoutMs = 20000) => {
+    const childId = agent.session.id
+    const startedAt = Date.now()
+    let polls = 0
+    for (;;) {
+      const pinned = host.ctx.handoff?.stateForSession?.(childId) ?? null
+      const reason = host.guardReason(agent, 'write')
+      const elapsedMs = Date.now() - startedAt
+      if (pinned !== null && pinned.handoffId === handoffId && reason === undefined) {
+        return { pinned: true, elapsedMs, polls, detail: 'pinned after ' + elapsedMs + 'ms' }
+      }
+      polls += 1
+      if (elapsedMs >= timeoutMs) {
+        return {
+          pinned: false,
+          elapsedMs,
+          polls,
+          detail: 'no pinned lease for ' + childId + ' after ' + elapsedMs + 'ms (' + polls + ' polls): state=' +
+            (pinned === null ? 'null' : pinned.handoffId) + ', expected=' + handoffId + ', guardReason=' + (reason ?? 'none'),
+        }
+      }
+      // A 1 ms timer yields the poll phase to the pending capture; a
+      // setImmediate spin can outrun the disk read it is waiting for.
+      await new Promise(resolve => setTimeout(resolve, 1))
     }
-    return false
   }
   host.unload = async () => {
     for (const value of [...host.effects].reverse()) {
@@ -898,7 +938,9 @@ test('child delegation matrix: a delegated child inherits the parent lease, an u
   // The assembly, never the model, pins the implementation child it observes.
   host.emitChildStart({ id: 'child-delegated', runId: 'run-child-delegated' })
   const delegatedChild = host.childSession('child-delegated')
-  assert.equal(await host.waitFor(() => host.guardReason(delegatedChild, 'write') === undefined), true, 'a delegated child inherits the parent lease')
+  const delegatedPin = await host.waitForPinned(delegatedChild, checked.handoffId)
+  assert.equal(delegatedPin.pinned, true, 'the assembly pins the observed child: ' + delegatedPin.detail)
+  assert.equal(host.guardReason(delegatedChild, 'write'), undefined, 'a delegated child inherits the parent lease')
   const childCheck = await host.invokeTool('ulw_handoff', { action: 'check', target }, delegatedChild)
   assert.equal(childCheck.ok, true, JSON.stringify(childCheck.diagnostics))
 
@@ -932,7 +974,9 @@ test('a delegated child inherits the required lease and its revocation', async (
 
   host.emitChildStart({ id: 'child-required', runId: 'run-child-required' }, host.parent)
   const child = host.childSession('child-required')
-  assert.equal(await host.waitFor(() => host.guardReason(child, 'write') === undefined), true, 'the delegated child inherits the required lease')
+  const childPin = await host.waitForPinned(child, checked.handoffId)
+  assert.equal(childPin.pinned, true, 'the assembly pins the observed child: ' + childPin.detail)
+  assert.equal(host.guardReason(child, 'write'), undefined, 'the delegated child inherits the required lease')
   const childCheck = await host.invokeTool('ulw_handoff', { action: 'check', target }, child)
   assert.equal(childCheck.ok, true, JSON.stringify(childCheck.diagnostics))
   assert.equal(childCheck.required, true)
