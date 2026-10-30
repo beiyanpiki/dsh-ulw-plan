@@ -13,19 +13,20 @@
 //       --cleanup <receipt>... --attempt <n> --checkpoint-opened-at <ISO>
 //       [--ledger <path>] [--extra <json-object>]
 //
-// The plan file is never rewritten from a read result: `tick` changes EXACTLY ONE
-// status byte, in one column-zero row, through a temp file + chmod + rename, then
-// re-reads the file from disk and requires (a) the same byte length, (b) exactly one
-// differing byte at the checkbox offset, and (c) the expected content. On any
-// mismatch it restores the original bytes and exits 4. Refusals (exit 2/3/5) never
-// write, so an ambiguous plan is left byte-identical.
+// The plan file is never rewritten from a read result: `tick` selects one task row
+// inside the canonical `## Todos` / `## Final verification wave` sections, re-reads
+// the file, and refuses (exit 5) if another writer changed it. It then changes EXACTLY
+// ONE status byte in place, re-reads the file, and requires (a) the same byte length,
+// (b) exactly one differing byte at the checkbox offset, and (c) the expected content.
+// On any mismatch it rolls that one byte back and exits 4. Refusals (exit 2/3/4/5)
+// never leave the file rewritten from a stale snapshot.
 //
 // Exit codes: 0 ok (including "already at target"); 2 row not found; 3 ambiguous
-// (2+ matching rows); 4 post-write self-check failed and the original bytes were
-// restored; 5 usage/IO/validation.
+// (2+ matching rows); 4 post-write self-check failed and the single status byte was
+// rolled back; 5 usage/IO/validation, including a plan changed by another writer.
 
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { appendFileSync, closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // The harness `read` tool caps output at 50 KiB; a plan bigger than this is normal
@@ -33,7 +34,14 @@ import { pathToFileURL } from "node:url";
 export const READ_CAP_BYTES = 50 * 1024;
 
 const DEFAULT_LEDGER_PATH = join(".dsh", "ulw", "ulw-execute", "ledger.jsonl");
+// Canonical task sections emitted by the ulw-plan templates (heading text compared
+// case-insensitively). Only column-zero rows inside them are executable tasks when
+// the plan declares H2 sections at all.
+const TASK_SECTION_TITLES = new Set(["todos", "final verification wave"]);
 const ROW_RE = /^- \[([ x~])\] (\d+|F\d+)\. /;
+const HEADING_RE = /^(#{1,6})(?:[ \t]+(.*))?$/;
+const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_RE = /^( {0,3})(`{3,}|~{3,})[ \t\r]*$/;
 const SESSION_RE = /^(dsh|codex):\S+$/;
 const ADVERSARIAL_RE = /^([a-z][a-z0-9_]*)=(.+)$/;
 const LEDGER_FIELDS = ["event", "plan", "task", "session_id", "commands", "artifact", "adversarial_classes", "cleanup", "attempt", "checkpoint_opened_at"];
@@ -56,27 +64,102 @@ function toBuffer(content) {
 	throw new PlanStateError("plan content must be a string or a Buffer", 5);
 }
 
-// Scan the file as bytes: a row is a line whose FIRST characters are the checklist
-// prefix, so indented, quoted, or nested checkboxes never match. The status byte is
-// always at lineStart + 3 because the prefix is ASCII.
-function scanRows(buffer) {
+function headingOf(line) {
+	const match = HEADING_RE.exec(line);
+	if (!match) return null;
+	const title = (match[2] ?? "").replace(/\r$/, "").replace(/[ \t]+#+[ \t]*$/, "").trim();
+	return { level: match[1].length, title };
+}
+
+function fenceOpening(line) {
+	const match = FENCE_OPEN_RE.exec(line);
+	if (!match) return null;
+	if (match[2][0] === "`" && match[3].includes("`")) return null;
+	return { char: match[2][0], length: match[2].length };
+}
+
+function fenceClosing(line, fence) {
+	const match = FENCE_CLOSE_RE.exec(line);
+	return Boolean(match) && match[2][0] === fence.char && match[2].length >= fence.length;
+}
+
+function opensHtmlComment(line) {
+	let index = 0;
+	for (;;) {
+		const start = line.indexOf("<!--", index);
+		if (start === -1) return false;
+		const end = line.indexOf("-->", start + 4);
+		if (end === -1) return true;
+		index = end + 3;
+	}
+}
+
+// Scan the file as bytes. A row must be a column-zero checklist line; fenced code
+// blocks (including info strings and unclosed/nested fences), HTML comments, block
+// quotes, indented code, and nested lists never contribute rows. Headings only count
+// outside those constructs. When the document declares H2 sections, only rows inside
+// the canonical task sections are executable; flat plans without H2 headings keep the
+// historical whole-file row scan. The status byte is always at lineStart + 3 because
+// the prefix is ASCII.
+function scanDocument(buffer) {
 	const rows = [];
+	let hasH2 = false;
+	let inTaskSection = false;
+	let fence = null;
+	let comment = false;
 	let lineStart = 0;
 	let line = 1;
 	for (;;) {
 		const newline = buffer.indexOf(10, lineStart);
 		const lineEnd = newline === -1 ? buffer.length : newline;
-		const match = ROW_RE.exec(buffer.subarray(lineStart, lineEnd).toString("utf8"));
-		if (match) rows.push({ id: match[2], status: match[1], line, offset: lineStart + 3 });
+		const raw = buffer.subarray(lineStart, lineEnd).toString("utf8");
+		// A UTF-8 BOM is metadata, not content: ignore it when classifying the first
+		// line, but keep its three bytes in every row offset.
+		const bom = lineStart === 0 && raw.charCodeAt(0) === 0xfeff ? 3 : 0;
+		const text = bom === 0 ? raw : raw.slice(1);
+		let structural = false;
+		if (fence !== null) {
+			if (fenceClosing(text, fence)) fence = null;
+			structural = true;
+		} else if (comment) {
+			if (text.includes("-->")) comment = false;
+			structural = true;
+		} else {
+			const opening = fenceOpening(text);
+			if (opening !== null) {
+				fence = opening;
+				structural = true;
+			} else if (opensHtmlComment(text)) {
+				comment = true;
+			}
+		}
+		if (!structural) {
+			const heading = headingOf(text);
+			if (heading !== null) {
+				if (heading.level === 2) hasH2 = true;
+				if (heading.level <= 2) {
+					inTaskSection = heading.level === 2 && TASK_SECTION_TITLES.has(heading.title.toLowerCase());
+				}
+			} else {
+				const match = ROW_RE.exec(text);
+				if (match) {
+					rows.push({ id: match[2], status: match[1], line, offset: lineStart + bom + 3, task: inTaskSection });
+				}
+			}
+		}
 		if (newline === -1) break;
 		lineStart = newline + 1;
 		line += 1;
 	}
-	return rows;
+	return { rows, hasH2 };
+}
+
+function selectedRows(scan) {
+	return scan.hasH2 ? scan.rows.filter((row) => row.task) : scan.rows;
 }
 
 export function parseRows(content) {
-	return scanRows(toBuffer(content)).map(({ id, status, line }) => ({ id, status, line }));
+	return selectedRows(scanDocument(toBuffer(content))).map(({ id, status, line }) => ({ id, status, line }));
 }
 
 export function summarize(content) {
@@ -99,18 +182,18 @@ export function applyTick(content, rowId, to = "x") {
 	if (to !== "x" && to !== "~") throw new PlanStateError('--to must be "x" or "~"', 5);
 	if (typeof rowId !== "string" || rowId === "") throw new PlanStateError("row id must be a non-empty string", 5);
 	const buffer = toBuffer(content);
-	const matches = scanRows(buffer).filter((row) => row.id === rowId);
+	const matches = selectedRows(scanDocument(buffer)).filter((row) => row.id === rowId);
 	if (matches.length === 0) throw new PlanStateError(`row not found: ${rowId}`, 2);
 	if (matches.length > 1) {
 		throw new PlanStateError(`ambiguous row id ${rowId}: ${matches.length} column-zero rows match`, 3);
 	}
 	const row = matches[0];
 	if (row.status === to) {
-		return { changed: false, rowId, status: to, line: row.line, offset: row.offset, content: buffer };
+		return { changed: false, rowId, status: to, from: row.status, line: row.line, offset: row.offset, content: buffer };
 	}
 	const updated = Buffer.from(buffer);
 	updated[row.offset] = to.charCodeAt(0);
-	return { changed: true, rowId, status: to, line: row.line, offset: row.offset, content: updated };
+	return { changed: true, rowId, status: to, from: row.status, line: row.line, offset: row.offset, content: updated };
 }
 
 function requireText(value, flag) {
@@ -218,25 +301,87 @@ export function validateLedgerEntry(input) {
 function readPlan(planPath) {
 	try {
 		const stat = statSync(planPath);
-		return { bytes: stat.size, mode: stat.mode & 0o7777, content: readFileSync(planPath) };
+		const content = readFileSync(planPath);
+		return { bytes: content.length, mode: stat.mode & 0o7777, content, dev: stat.dev, ino: stat.ino };
 	} catch (err) {
 		throw new PlanStateError(`cannot read plan ${planPath}: ${err instanceof Error ? err.message : String(err)}`, 5);
 	}
 }
 
-function writeAtomic(target, bytes, mode) {
-	const temp = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now().toString(36)}.tmp`);
+function concurrentRefusal(planPath) {
+	return `plan changed while ticking ${planPath}; refusing to overwrite concurrent edits (no bytes written)`;
+}
+
+// The snapshot must still be the plan on disk before a single byte is written. A
+// different inode means the path was replaced; different bytes mean another writer
+// appended or edited. Both are refusals, so the concurrent state stays untouched.
+function verifyUnchanged(planPath, snapshot) {
+	const fresh = readPlan(planPath);
+	if (fresh.dev !== snapshot.dev || fresh.ino !== snapshot.ino || !fresh.content.equals(snapshot.content)) {
+		throw new PlanStateError(concurrentRefusal(planPath), 5);
+	}
+	return fresh;
+}
+
+// Change exactly one status byte in place. No snapshot is ever written back: the
+// descriptor is re-read immediately before writeSync, so a writer that wins the race
+// makes this refuse instead of corrupting or discarding their bytes.
+function writeStatusByte(planPath, snapshot, offset, expectedStatus, targetStatus) {
+	let fd;
 	try {
-		writeFileSync(temp, bytes, { mode });
-		chmodSync(temp, mode);
-		renameSync(temp, target);
+		fd = openSync(planPath, "r+");
 	} catch (err) {
-		try {
-			unlinkSync(temp);
-		} catch {
-			// The temp file was never created or was already renamed into place.
+		throw new PlanStateError(`cannot open ${planPath} for writing: ${err instanceof Error ? err.message : String(err)}`, 5);
+	}
+	try {
+		const stat = fstatSync(fd);
+		if (stat.dev !== snapshot.dev || stat.ino !== snapshot.ino) throw new PlanStateError(concurrentRefusal(planPath), 5);
+		const current = readFileSync(fd);
+		if (!current.equals(snapshot.content)) throw new PlanStateError(concurrentRefusal(planPath), 5);
+		if (current[offset] !== expectedStatus.charCodeAt(0)) {
+			throw new PlanStateError(`unexpected status byte at ${offset} in ${planPath}; refusing to write`, 5);
 		}
-		throw new PlanStateError(`cannot write ${target} atomically: ${err instanceof Error ? err.message : String(err)}`, 5);
+		writeSync(fd, Buffer.from(targetStatus), 0, 1, offset);
+		fsyncSync(fd);
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			// The descriptor was already closed.
+		}
+	}
+}
+
+// Undo only our own status byte. Returns "restored" when the plan is byte-identical
+// to the snapshot again, "rolled-back" when concurrent edits remain, and null when
+// the path is no longer the inode we wrote (so there is nothing safe to undo).
+function rollbackStatusByte(planPath, snapshot, offset, writtenStatus, originalStatus) {
+	let fd;
+	try {
+		fd = openSync(planPath, "r+");
+	} catch {
+		return null;
+	}
+	try {
+		const stat = fstatSync(fd);
+		if (stat.dev !== snapshot.dev || stat.ino !== snapshot.ino) return null;
+		const current = readFileSync(fd);
+		if (current[offset] !== writtenStatus.charCodeAt(0)) return null;
+		writeSync(fd, Buffer.from(originalStatus), 0, 1, offset);
+		fsyncSync(fd);
+	} catch {
+		return null;
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			// The descriptor was already closed.
+		}
+	}
+	try {
+		return readFileSync(planPath).equals(snapshot.content) ? "restored" : "rolled-back";
+	} catch {
+		return "rolled-back";
 	}
 }
 
@@ -251,15 +396,6 @@ function verifyTick(original, expected, actual, offset) {
 		}
 	}
 	return differences === 1 && firstDifference === offset && actual.equals(expected);
-}
-
-function restoreOriginal(target, original, mode) {
-	try {
-		writeAtomic(target, original, mode);
-		return readFileSync(target).equals(original);
-	} catch {
-		return false;
-	}
 }
 
 function takeValue(args, index, flag) {
@@ -308,12 +444,13 @@ function runTick(args) {
 	if (to !== "x" && to !== "~") throw new PlanStateError('--to must be "x" or "~"', 5);
 	const plan = readPlan(planPath);
 	const result = applyTick(plan.content, rowId, to);
+	const fresh = verifyUnchanged(planPath, plan);
 	if (!result.changed) {
 		const record = { plan: planPath, rowId, status: to, changed: false, line: result.line };
 		process.stdout.write(json ? `${JSON.stringify(record)}\n` : `already ${rowId} ${to}\n`);
 		return 0;
 	}
-	writeAtomic(planPath, result.content, plan.mode);
+	writeStatusByte(planPath, fresh, result.offset, result.from, to);
 	let actual = null;
 	try {
 		actual = readFileSync(planPath);
@@ -321,8 +458,13 @@ function runTick(args) {
 		actual = null;
 	}
 	if (actual === null || !verifyTick(plan.content, result.content, actual, result.offset)) {
-		const restored = restoreOriginal(planPath, plan.content, plan.mode);
-		const suffix = restored ? "original bytes restored" : "restore also failed - inspect the plan";
+		const rollback = rollbackStatusByte(planPath, plan, result.offset, to, result.from);
+		const suffix =
+			rollback === "restored"
+				? "original bytes restored"
+				: rollback === "rolled-back"
+					? "status byte rolled back; concurrent edits remain - inspect the plan"
+					: "restore skipped because the file changed again - inspect the plan";
 		throw new PlanStateError(`post-write self-check failed for ${planPath}; ${suffix}`, 4);
 	}
 	const record = { plan: planPath, rowId, status: to, changed: true, line: result.line };
@@ -422,9 +564,11 @@ const USAGE = [
 	"      [--ledger <path>] [--extra <json-object>]",
 	"",
 	"status prints: plan=<path> bytes=<n> capped=<yes|no> total=<n> done=<n> open=<n> blocked=<n> next=<rowId|-> line=<n|->",
-	"tick flips exactly one column-zero row and verifies the change on disk; it never rewrites the rest of the plan.",
+	"tick flips one task row in ## Todos / ## Final verification wave, refuses when another writer changed",
+	"the plan, and otherwise writes exactly that one status byte without rewriting the rest of the file.",
 	"exit codes: 0 ok (including already at target); 2 row not found; 3 ambiguous row id;",
-	"            4 post-write self-check failed and the original bytes were restored; 5 usage/IO/validation",
+	"            4 post-write self-check failed and the single status byte was rolled back;",
+	"            5 usage/IO/validation (including a plan changed by another writer; nothing written)",
 ].join("\n");
 
 function main(argv) {
