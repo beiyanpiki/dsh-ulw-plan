@@ -1,0 +1,5 @@
+import { createHash } from 'node:crypto'
+
+export function lintPlan(options) {
+  return { valid: true, diagnostics: [], sha256: createHash('sha256').update(options.content).digest('hex') }
+}

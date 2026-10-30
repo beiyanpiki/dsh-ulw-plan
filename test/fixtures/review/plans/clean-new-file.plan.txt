@@ -1,0 +1,58 @@
+# corpus-clean-new-file - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the ULW plan author who needs a machine-readable review corpus.
+**Outcome:** a clean plan that cites a to-be-created module and must not be rejected.
+
+---
+
+> TL;DR (machine): Quick / Low；1 个实施 todo + F1；新目标不是缺失引用。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 新模块可被绑定审阅读取。 | 尚未创建。 |
+| GAP-1 | 语料库缺少可机读真值。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 新建语料库真值校验器
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 新建 `lib/review-corpus-new.js` 与 `test/review-corpus-new.test.mjs`；阅读 `docs/fidelity.md`；不修改 `lib/review-lint.js`。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: F1
+  References: `docs/fidelity.md`；`lib/review-corpus-new.js`；`test/**/*.test.mjs`；https://example.com/corpus/spec；`$E/task-1.txt`；IS-1。
+  Acceptance criteria: `node --test test/review-corpus-new.test.mjs` 退出 0，且新模块没有副作用。
+  QA scenarios: Happy “new-file-is-not-missing-reference” 待新建模块只产生 warning。Failure “missing-marker” 删除校验标记后断言失败。
+  Commit: Y | test(corpus): clean new file case
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | new-file-is-not-missing-reference | `$E/task-1.txt` |

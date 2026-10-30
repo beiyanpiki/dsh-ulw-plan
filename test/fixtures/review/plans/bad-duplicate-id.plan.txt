@@ -1,0 +1,79 @@
+# corpus-bad-duplicate-id - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the executor reading task ids.
+**Outcome:** two different tasks claim the same execution id.
+
+---
+
+> TL;DR (machine): Quick / Low；3 个实施 todo；两个 todo 使用同一个 id。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 每个任务的执行身份唯一。 | 1 交付。 |
+| GAP-1 | 任务 id 在执行账本中冲突。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+- Wave 2: task 2
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 增加投影字段
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/projection.js:1-3` 中新增字段；不改变既有字段。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 2
+  References: `lib/projection.js:1-3`；`docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/projection.test.mjs` 退出 0。
+  QA scenarios: Happy “field-added” 新字段出现。Failure “field-missing” 新字段缺失。
+  Commit: Y | feat(projection): add field
+
+- [ ] 2. 增加投影计数
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/projection.js:1-3` 中新增计数；不改变既有字段。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: F1
+  References: `lib/projection.js:1-3`；`docs/fidelity.md`；`$E/task-2.txt`。
+  Acceptance criteria: 计数与行数一致。
+  QA scenarios: Happy “count-added” 计数出现。Failure “count-missing” 计数缺失。
+  Commit: Y | feat(projection): add count
+
+- [ ] 2. 增加投影缓存
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/projection.js:1-3` 中新增缓存；不改变既有字段。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: F1
+  References: `lib/projection.js:1-3`；`docs/fidelity.md`；`$E/task-2.txt`。
+  Acceptance criteria: 重复投影命中缓存。
+  QA scenarios: Happy “cache-added” 缓存命中。Failure “cache-missing” 每次重新计算。
+  Commit: Y | feat(projection): add cache
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 3 | Blocked by: 2 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,2,F1 | field-added | `$E/task-1.txt` |

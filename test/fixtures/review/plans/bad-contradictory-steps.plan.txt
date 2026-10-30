@@ -1,0 +1,69 @@
+# corpus-bad-contradictory-steps - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the executor migrating legacy shim callers.
+**Outcome:** a plan whose two steps delete and extend the same module.
+
+---
+
+> TL;DR (machine): Quick / Low；2 个实施 todo；删除与扩展落在同一文件上。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 调用方迁移后不再依赖旧 shim。 | 1 删除旧 shim。 |
+| GAP-1 | 旧 shim 与过渡导出并存。 | 1 关闭，2 声称兼容。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+- Wave 2: task 2
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 删除旧 shim 并迁移导出
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 删除 `lib/legacy-shim.js`，把导出迁移到 `lib/shim-next.js`；不保留旧文件。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 2
+  References: `lib/legacy-shim.js`；`lib/shim-next.js`；`docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/shim-next.test.mjs` 退出 0，且旧文件不再存在。
+  QA scenarios: Happy “old-shim-removed” 旧文件被删除。Failure “old-shim-left” 旧文件仍存在即失败。
+  Commit: Y | refactor(shim): move exports forward
+
+- [ ] 2. 在旧 shim 上新增过渡导出
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/legacy-shim.js` 中新增 `withTimeout` 导出供调用方过渡使用；不修改 `lib/shim-next.js`。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: F1
+  References: `lib/legacy-shim.js`；`$E/task-2.txt`。
+  Acceptance criteria: `node --test test/legacy-shim.test.mjs` 退出 0。
+  QA scenarios: Happy “with-timeout-exported” 新导出可被导入。Failure “module-absent” 文件不存在时导入失败。
+  Commit: Y | feat(shim): add compatibility export
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 3 | Blocked by: 2 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,2,F1 | old-shim-removed | `$E/task-1.txt` |

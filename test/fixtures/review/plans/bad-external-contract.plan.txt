@@ -1,0 +1,58 @@
+# corpus-bad-external-contract - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the operator deleting a stale review record.
+**Outcome:** a plan that assumes a throw the local contract never documents.
+
+---
+
+> TL;DR (machine): Quick / Low；1 个实施 todo；delete 的缺失键行为与本地契约相反。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 删除记录后重复删除仍是幂等成功。 | 1 交付。 |
+| GAP-1 | 缺失键删除的行为没有实现。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 删除记录并把缺失键当异常
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 调用 `promises.delete` 并捕获缺失键抛出的 `MISSING_KEY` 异常，把该异常当作幂等成功；不修改 `contracts/host-kv.md`。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: F1
+  References: `contracts/host-kv.md:3-5`；`docs/fidelity.md`；`lib/review-store.js`；`$E/task-1.txt`。
+  Acceptance criteria: 缺失键删除返回成功且不抛异常。
+  QA scenarios: Happy “double-delete-idempotent” 第二次删除返回成功。Failure “missing-key-throws” 契约若抛出则本计划假设失败。
+  Commit: Y | feat(store): delete records idempotently
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: —
+  References: `contracts/host-kv.md:3-5`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | double-delete-idempotent | `$E/task-1.txt` |

@@ -1,0 +1,65 @@
+# corpus-clean-large-utf8 - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the reviewer reading a plan with a large UTF-8 appendix.
+**Outcome:** size, CRLF and emoji never change the structural verdict.
+
+---
+
+> TL;DR (machine): Quick / Low；1 个实施 todo + F1；大文件由 builder 物化。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 大体积 UTF-8 计划仍被正确预检。 | builder 生成。 |
+| GAP-1 | 缺少大文件语料。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 校验大体积 UTF-8 计划
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 读取 `docs/fidelity.md`；确认 builder 输出至少 100 KiB；不提交大副本。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: F1
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: builder 输出字节数不低于 102400。
+  QA scenarios: Happy “large-utf8-builds” 三次构建字节一致。Failure “large-utf8-differs” 任意两次构建不同即失败。
+  Commit: Y | test(corpus): large utf8 case
+
+以下为 builder 生成的大体积 UTF-8 附录（fence 内是数据，不是行）：
+
+```text
+%%REPEAT%%
+%%LONG%%
+```
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | large-utf8-builds | `$E/task-1.txt` |

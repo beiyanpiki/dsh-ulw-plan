@@ -1,0 +1,58 @@
+# corpus-clean-small-change - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the operator reading projection counts.
+**Outcome:** an existing helper gains one counter without changing its contract.
+
+---
+
+> TL;DR (machine): Quick / Low；1 个实施 todo + F1；仅修改既有投影模块。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 操作员看到与状态文件一致的任务计数。 | 计数来自同一投影结果。 |
+| GAP-1 | 投影输出没有任务计数。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 给既有投影模块补一个计数
+  Recommended task executor category: unspecified-low — small change
+  What to do / Must NOT do: 修改 `lib/projection.js:1-3` 中的投影返回值，新增 `taskCount` 字段；不改变既有字段。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: F1
+  References: `lib/projection.js:1-3`；`test/*.test.mjs`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/projection.test.mjs` 退出 0，且既有投影字段逐字节不变。
+  QA scenarios: Happy “count-matches-rows” 计数等于状态文件中的行数。Failure “count-drifts” 行数变化时计数同步变化。
+  Commit: Y | fix(projection): report taskCount
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: —
+  References: `lib/projection.js:1-3`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | count-matches-rows | `$E/task-1.txt` |

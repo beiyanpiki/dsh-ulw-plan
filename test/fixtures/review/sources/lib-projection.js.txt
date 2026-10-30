@@ -1,0 +1,3 @@
+export function projectTasks(rows) {
+  return { rows: rows.map(row => ({ id: row.id })) }
+}

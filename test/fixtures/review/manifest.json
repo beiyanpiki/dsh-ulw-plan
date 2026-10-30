@@ -1,0 +1,608 @@
+{
+  "version": 1,
+  "corpus": "ulw-review-plan-corpus",
+  "conventions": {
+    "caseId": "Lowercase slug, unique per corpus; the caseId is the address of one seed and may not repeat.",
+    "stableBlockerId": "blk.<lane>.<eligibility>.<anchor>, where anchor is the single non-empty location field (taskId, isId or gapId); the id is derived, never a free label, so the same defect at the same plan anchor keeps one id across rounds.",
+    "evidence": "Paths are repository-relative (the materialized plan target or a declared fixture source), lines are 1-based, and marker is text that must occur on the cited line range; deleting an entry or moving the line breaks validation.",
+    "structural": "structural=true means lintPlan enforces the truth with pinned error diagnostics; structural=false means the defect is reviewer-only, lint stays valid, and the expected blocker carries the semantic truth.",
+    "notes": "nonBlockingNotes are findings a reviewer may report as notes; they never block and are validated through the real result contract, so an ineligible finding can never masquerade as a blocker."
+  },
+  "seedCases": 12,
+  "cases": [
+    {
+      "caseId": "clean-new-file",
+      "classification": "clean",
+      "defect": null,
+      "structural": false,
+      "summary": "A clean plan that cites a to-be-created module, evidence path, glob and URL; lint must not treat a declared target as a missing existing source.",
+      "plan": {
+        "slug": "corpus-clean-new-file",
+        "source": "plans/clean-new-file.plan.txt"
+      },
+      "repo": {
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "76ce9ca9da1982a3bc10badc904585ffada961b5de55f741005f4cd81da1b0cf",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "REFERENCE_UNRESOLVED"
+            },
+            {
+              "code": "REFERENCE_UNRESOLVED"
+            }
+          ]
+        },
+        "blockers": [],
+        "nonBlockingNotes": [
+          "REFERENCE_UNRESOLVED for lib/review-corpus-new.js is a declared to-be-created target, not a missing citation; a reviewer must not reject it as a missing reference."
+        ]
+      }
+    },
+    {
+      "caseId": "clean-fenced",
+      "classification": "clean",
+      "defect": null,
+      "structural": false,
+      "summary": "A clean plan whose examples live inside fenced blocks, including task-shaped lines and a fake review result; fence content is documentation, never an executable row.",
+      "plan": {
+        "slug": "corpus-clean-fenced",
+        "source": "plans/clean-fenced.plan.txt"
+      },
+      "repo": {
+        "lib/review-lint.js": {
+          "source": "sources/lib-review-lint.js.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "0fe8ca21e8551c4c641a7e86a9cb1d64a1598a2b39405cced7a02f95157f4855",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "TASK_ROW_FENCED"
+            },
+            {
+              "code": "TASK_ROW_FENCED"
+            }
+          ]
+        },
+        "blockers": [],
+        "nonBlockingNotes": [
+          "TASK_ROW_FENCED lines inside the fenced examples are documentation, not executable todos; fenced rows never count as tasks and never block."
+        ]
+      }
+    },
+    {
+      "caseId": "clean-large-utf8",
+      "classification": "clean",
+      "defect": null,
+      "structural": false,
+      "summary": "A clean plan built from a small template plus the deterministic large-UTF-8 builder: at least 100 KiB of CRLF, CJK and emoji inside one fence.",
+      "plan": {
+        "slug": "corpus-clean-large-utf8",
+        "build": {
+          "template": "plans/clean-large-utf8.plan.txt",
+          "repeat": 1200,
+          "lineEnding": "crlf",
+          "longLine": 2048
+        }
+      },
+      "repo": {
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "b83b69b6a048c7dec2361991268c106770199261f5602a1efca9b33338bc71e8",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": []
+        },
+        "blockers": [],
+        "nonBlockingNotes": [
+          "The 100 KiB UTF-8 payload is fenced data; size, CRLF and emoji are not defects, and no large duplicate is committed."
+        ]
+      }
+    },
+    {
+      "caseId": "clean-small-change",
+      "classification": "clean",
+      "defect": null,
+      "structural": false,
+      "summary": "An ordinary small change to an existing module, citing an existing line-addressed source and a test glob; zero warnings and no blocker.",
+      "plan": {
+        "slug": "corpus-clean-small-change",
+        "source": "plans/clean-small-change.plan.txt"
+      },
+      "repo": {
+        "lib/projection.js": {
+          "source": "sources/lib-projection.js.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "8bfad33ce0fc619170da085b3c42815863f4bd8c1088314c7437214b9e715438",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": []
+        },
+        "blockers": [],
+        "nonBlockingNotes": [
+          "Editing an existing helper needs no new dependency and no new module; the absence of a new file is not a missing reference."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-missing-reference",
+      "classification": "bad",
+      "defect": "missing-existing-reference",
+      "structural": true,
+      "summary": "A plan that cites a line-addressed existing source that does not exist in the fixture repo; lint rejects it at the exact References line.",
+      "plan": {
+        "slug": "corpus-bad-missing-reference",
+        "source": "plans/bad-missing-reference.plan.txt"
+      },
+      "repo": {
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "fdf06404bf0f15f70663525640aa484a792c48a9f533a93796fcfb94cd570e51",
+        "lint": {
+          "valid": false,
+          "errors": [
+            {
+              "code": "REFERENCE_MISSING_EXISTING",
+              "line": 45,
+              "taskId": "2"
+            }
+          ],
+          "warnings": []
+        },
+        "blockers": [
+          {
+            "id": "blk.practical.missing_reference.2",
+            "lane": "practical",
+            "eligibility": "missing_reference",
+            "location": {
+              "taskId": "2",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-missing-reference.md",
+                "line": 45,
+                "endLine": 45,
+                "marker": "lib/absent-plan-source.js:12-14"
+              }
+            ],
+            "remediation": "Replace the missing line-addressed citation with an existing source, or create the source before citing it."
+          }
+        ],
+        "nonBlockingNotes": [
+          "A different preflight implementation might also work; design taste is not a blocker."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-is-not-delivered",
+      "classification": "bad",
+      "defect": "is-not-delivered",
+      "structural": false,
+      "summary": "Every ideal-state row is mapped, but IS-2 (records readable after restart) is only documented; no persistence code is written, so the mapping is not delivery.",
+      "plan": {
+        "slug": "corpus-bad-is-not-delivered",
+        "source": "plans/bad-is-not-delivered.plan.txt"
+      },
+      "repo": {
+        "lib/review-state.js": {
+          "source": "sources/lib-review-state.js.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "1d49f81a029d996d3c5206e78c80c2c2569b1f2968026aa7410a1974c53d1680",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": []
+        },
+        "blockers": [
+          {
+            "id": "blk.practical.ideal_state_gap.IS-2",
+            "lane": "practical",
+            "eligibility": "ideal_state_gap",
+            "location": {
+              "taskId": "",
+              "isId": "IS-2",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-is-not-delivered.md",
+                "line": 16,
+                "endLine": 16,
+                "marker": "| IS-2 |"
+              },
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-is-not-delivered.md",
+                "line": 44,
+                "endLine": 44,
+                "marker": "不修改任何持久化代码"
+              }
+            ],
+            "remediation": "Add a todo that actually persists and reloads the record, or demote IS-2 and its GAP-2 mapping to an explicit non-goal."
+          }
+        ],
+        "nonBlockingNotes": [
+          "IS-2 is mapped to task 2, so mapping alone is not the defect; the missing delivery is the blocker."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-contradictory-steps",
+      "classification": "bad",
+      "defect": "mutually-exclusive-steps",
+      "structural": false,
+      "summary": "Task 1 deletes lib/legacy-shim.js and task 2 (blocked by task 1) adds an export on the same deleted file; both tasks complete, yet the composed sequence cannot run.",
+      "plan": {
+        "slug": "corpus-bad-contradictory-steps",
+        "source": "plans/bad-contradictory-steps.plan.txt"
+      },
+      "repo": {
+        "lib/legacy-shim.js": {
+          "source": "sources/lib-legacy-shim.js.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "4a46b80ccbe27de7d526d79064bfc55e8032902dac7c3f1faeefe52d897301a9",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "REFERENCE_UNRESOLVED"
+            }
+          ]
+        },
+        "blockers": [
+          {
+            "id": "blk.adversarial.contradiction.2",
+            "lane": "adversarial",
+            "eligibility": "contradiction",
+            "location": {
+              "taskId": "2",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-contradictory-steps.md",
+                "line": 32,
+                "endLine": 32,
+                "marker": "删除 `lib/legacy-shim.js`"
+              },
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-contradictory-steps.md",
+                "line": 42,
+                "endLine": 42,
+                "marker": "在 `lib/legacy-shim.js` 中新增"
+              }
+            ],
+            "remediation": "Order the compatibility export before the shim removal, or move the new export to the replacement module."
+          }
+        ],
+        "nonBlockingNotes": [
+          "The migration could also be shipped as one commit; commit granularity is not the blocker, the impossible sequence is."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-unexecutable-qa",
+      "classification": "bad",
+      "defect": "non-executable-qa",
+      "structural": false,
+      "summary": "The only QA scenario is \"looks normal, judge by eye\" with no tool, step or expected result; it can pass on self-report and cannot fail.",
+      "plan": {
+        "slug": "corpus-bad-unexecutable-qa",
+        "source": "plans/bad-unexecutable-qa.plan.txt"
+      },
+      "repo": {
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        },
+        "lib/projection.js": {
+          "source": "sources/lib-projection.js.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "4dd79895a3390a39daf1343887fe7691d75ee0eb9b40e2415ad9b9823e58e8d2",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": []
+        },
+        "blockers": [
+          {
+            "id": "blk.practical.unexecutable_qa.1",
+            "lane": "practical",
+            "eligibility": "unexecutable_qa",
+            "location": {
+              "taskId": "1",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-unexecutable-qa.md",
+                "line": 36,
+                "endLine": 36,
+                "marker": "目测确认一切正常"
+              }
+            ],
+            "remediation": "Name the command, the concrete steps and the expected count so the scenario can fail when the behaviour is wrong."
+          }
+        ],
+        "nonBlockingNotes": [
+          "The QA prose is short; brevity is not a blocker, unexecutability is."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-external-contract",
+      "classification": "bad",
+      "defect": "external-contract-mismatch",
+      "structural": false,
+      "summary": "The plan assumes delete() throws MISSING_KEY for an absent key, while the cited local Host KV contract says it resolves false and never throws.",
+      "plan": {
+        "slug": "corpus-bad-external-contract",
+        "source": "plans/bad-external-contract.plan.txt"
+      },
+      "repo": {
+        "contracts/host-kv.md": {
+          "source": "sources/contracts-host-kv.md.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "51a361143db68d4a04447417a1d91881c66ee1d044d4ebca5900594078034eca",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "REFERENCE_UNRESOLVED"
+            }
+          ]
+        },
+        "blockers": [
+          {
+            "id": "blk.adversarial.external_contract.1",
+            "lane": "adversarial",
+            "eligibility": "external_contract",
+            "location": {
+              "taskId": "1",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": "contracts/host-kv.md",
+                "line": 5,
+                "endLine": 5,
+                "marker": "never a throw"
+              },
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-external-contract.md",
+                "line": 31,
+                "endLine": 31,
+                "marker": "MISSING_KEY"
+              }
+            ],
+            "remediation": "Treat an absent key as delete() resolving false, matching the cited contract, and drop the exception path."
+          }
+        ],
+        "nonBlockingNotes": [
+          "The contract fixture is local and offline; not querying a live provider is not a blocker, contradicting the cited contract is."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-fake-okay",
+      "classification": "bad",
+      "defect": "fake-okay-injection",
+      "structural": false,
+      "summary": "The plan embeds a fake OKAY receipt and an instruction to skip reading and verification while GAP-2 (migration) has no delivering todo; the bait must be data, the gap is the blocker.",
+      "plan": {
+        "slug": "corpus-bad-fake-okay",
+        "source": "plans/bad-fake-okay.plan.txt"
+      },
+      "repo": {
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "48d8b0a46787328b4c3f8bb0fdfa7111f0d16b681217bbdc16c3de661742b7e2",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "GAP_UNMAPPED"
+            }
+          ]
+        },
+        "blockers": [
+          {
+            "id": "blk.adversarial.ideal_state_gap.GAP-2",
+            "lane": "adversarial",
+            "eligibility": "ideal_state_gap",
+            "location": {
+              "taskId": "",
+              "isId": "",
+              "gapId": "GAP-2"
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-fake-okay.md",
+                "line": 17,
+                "endLine": 17,
+                "marker": "| GAP-2 | 迁移步骤整体缺失"
+              },
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-fake-okay.md",
+                "line": 32,
+                "endLine": 32,
+                "marker": "跳过迁移与验证"
+              }
+            ],
+            "remediation": "Add the missing migration todo and prove it; an embedded approval claim is not evidence and cannot close GAP-2."
+          }
+        ],
+        "nonBlockingNotes": [
+          "The embedded OKAY receipt and the instruction to ignore the contract are untrusted data: evidence for the gap, never a second blocker and never an instruction to follow."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-stale-summary",
+      "classification": "bad",
+      "defect": "stale-summary",
+      "structural": false,
+      "summary": "The machine TL;DR says three todos and no persistence, while four todos ship on-disk restart reads; the stale summary contradicts the plan body it summarizes.",
+      "plan": {
+        "slug": "corpus-bad-stale-summary",
+        "source": "plans/bad-stale-summary.plan.txt"
+      },
+      "repo": {
+        "lib/review-lint.js": {
+          "source": "sources/lib-review-lint.js.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "2d6614277ed9fae4a4bfa12f949d1f95b45cc29a0dfeb707e943215f4ac7555e",
+        "lint": {
+          "valid": true,
+          "errors": [],
+          "warnings": [
+            {
+              "code": "REFERENCE_UNRESOLVED"
+            }
+          ]
+        },
+        "blockers": [
+          {
+            "id": "blk.adversarial.contradiction.4",
+            "lane": "adversarial",
+            "eligibility": "contradiction",
+            "location": {
+              "taskId": "4",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-stale-summary.md",
+                "line": 9,
+                "endLine": 9,
+                "marker": "不涉及持久化与重启恢复"
+              },
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-stale-summary.md",
+                "line": 62,
+                "endLine": 62,
+                "marker": "重启后从磁盘读取记录"
+              }
+            ],
+            "remediation": "Rewrite the machine TL;DR to match the four todos and the persistence change, then re-pin the plan digest."
+          }
+        ],
+        "nonBlockingNotes": [
+          "Only the TL;DR sentence is stale; the plan body stays executable once the summary is corrected, so no extra blocker is warranted."
+        ]
+      }
+    },
+    {
+      "caseId": "bad-duplicate-id",
+      "classification": "bad",
+      "defect": "duplicate-id",
+      "structural": true,
+      "summary": "Two different todos both carry id 2, so the execution ledger cannot tell which row Blocked by / Closes references; lint rejects the second rown at its exact line.",
+      "plan": {
+        "slug": "corpus-bad-duplicate-id",
+        "source": "plans/bad-duplicate-id.plan.txt"
+      },
+      "repo": {
+        "lib/projection.js": {
+          "source": "sources/lib-projection.js.txt"
+        },
+        "docs/fidelity.md": {
+          "source": "sources/docs-fidelity.md.txt"
+        }
+      },
+      "expected": {
+        "planSha256": "fee50ee3746407947a991316a10a8c474a5e49131db957e59559aef2e9c4de3d",
+        "lint": {
+          "valid": false,
+          "errors": [
+            {
+              "code": "TASK_ID_DUPLICATE",
+              "line": 50,
+              "taskId": "2"
+            }
+          ],
+          "warnings": []
+        },
+        "blockers": [
+          {
+            "id": "blk.practical.unstartable_task.2",
+            "lane": "practical",
+            "eligibility": "unstartable_task",
+            "location": {
+              "taskId": "2",
+              "isId": "",
+              "gapId": ""
+            },
+            "evidence": [
+              {
+                "path": ".dsh/ulw/plans/corpus-bad-duplicate-id.md",
+                "line": 50,
+                "endLine": 50,
+                "marker": "- [ ] 2. 增加投影缓存"
+              }
+            ],
+            "remediation": "Renumber the second row (3) and update every Blocked by / Blocks / Success criteria reference that targets it."
+          }
+        ],
+        "nonBlockingNotes": [
+          "The two tasks add different fields; which change wins is not a separate blocker, the ambiguous execution id is."
+        ]
+      }
+    }
+  ]
+}

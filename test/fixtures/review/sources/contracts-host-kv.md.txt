@@ -1,0 +1,5 @@
+# Host KV contract (fixture)
+
+- get(unit, key) -> Promise<unknown | undefined>
+- set(unit, key, value) -> Promise<void>
+- delete(unit, key) -> Promise<boolean>   // false when the key was absent, never a throw
