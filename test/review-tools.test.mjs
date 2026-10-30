@@ -10,6 +10,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  HANDOFF_ACTIONS,
+  HANDOFF_TOOL,
+  HANDOFF_TOOL_OUTPUT_SCHEMA,
+  HANDOFF_TOOL_PARAMETERS,
   REVIEW_ACTIONS,
   REVIEW_ENHANCED_SERVICES,
   REVIEW_TOOL,
@@ -18,6 +22,8 @@ import {
   buildReviewEnvelope,
   capabilityStatus,
   createReviewEntry,
+  handoffToolDefinition,
+  renderHandoffEnvelope,
   renderReviewEnvelope,
   reviewToolDefinition,
 } from '../lib/review-tools.js'
@@ -108,9 +114,10 @@ function fakeCtx(services = {}) {
   }
 }
 
-function scriptedAssembly(script = {}) {
+function scriptedAssembly(script = {}, options = {}) {
   const order = []
   const invocations = []
+  const handoffCalls = []
   const diagnostics = []
   const assembly = {
     order,
@@ -128,8 +135,30 @@ function scriptedAssembly(script = {}) {
     async closeStore() { order.push('close-store'); return { diagnostics } },
     async release() { order.push('release'); return { diagnostics } },
   }
+  if (options.handoff === true) {
+    const scripted = options.handoffScript ?? {}
+    assembly.handoff = {
+      calls: handoffCalls,
+      async invoke(action, request, exec) {
+        handoffCalls.push({ action, request, exec })
+        const entry = scripted[action]
+        if (entry instanceof Error) throw entry
+        if (entry !== undefined) return entry
+        return {
+          ok: true, action, outcome: 'ordinary_lease', code: null, nextAction: 'execute',
+          target: request.target, handoffId: 'handoff-test', required: false,
+          lease: { handoffId: 'handoff-test', planSha256: 'a'.repeat(64), instructionSha256: 'b'.repeat(64), approvedRoundId: null, approvedSourceSha256: null, reviewedAt: null, expiresAt: null, required: false, target: request.target },
+          receipt: null, binding: null, diagnostics: [],
+        }
+      },
+      async dispose() { order.push('handoff:dispose') },
+    }
+  }
   return assembly
 }
+
+const EXEC_AGENT = { session: { id: 'session-1', header: { cwd: '/tmp/ws' } }, followup() {} }
+const execFor = (agent = EXEC_AGENT) => ({ agent, signal: new AbortController().signal })
 
 function entryWith(assembly, options = {}) {
   const ctx = fakeCtx(options.services)
@@ -412,10 +441,10 @@ test('dispose stops admission, settles reviewers, persists, closes the store, th
   const assembly = scriptedAssembly()
   const { entry, ctx, dispose } = entryWith(assembly)
   await entry.ready
-  assert.equal(ctx.registry.registered.length, 1)
+  assert.equal(ctx.registry.registered.length, 2)
   await dispose()
   assert.deepEqual(assembly.order, ['settle', 'close-store', 'release'])
-  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL])
+  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL])
   // Second dispose is a no-op with the same ordering, never a second teardown.
   await dispose()
   assert.deepEqual(assembly.order, ['settle', 'close-store', 'release'])
@@ -425,4 +454,170 @@ test('dispose stops admission, settles reviewers, persists, closes the store, th
   })
   assert.equal(after.phase, 'unavailable')
   assert.equal(after.completed, false)
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 27: the assembled handoff service and the ulw_handoff tool
+// ---------------------------------------------------------------------------
+
+test('ulw_handoff is one selector-only tool inside the installed JSON Schema subset', () => {
+  assertSchemaSubset(HANDOFF_TOOL_PARAMETERS)
+  assertSchemaSubset(HANDOFF_TOOL_OUTPUT_SCHEMA)
+  assert.equal(HANDOFF_TOOL_PARAMETERS.type, 'object')
+  assert.equal(HANDOFF_TOOL_PARAMETERS.additionalProperties, false)
+  assert.deepEqual([...HANDOFF_ACTIONS], ['check', 'bootstrap', 'bind-worktree'])
+  assert.deepEqual([...HANDOFF_ACTIONS], [...HANDOFF_TOOL_PARAMETERS.properties.action.enum])
+  assert.deepEqual(Object.keys(HANDOFF_TOOL_PARAMETERS.properties).sort(), ['action', 'target', 'worktreePath'])
+  assert.equal(HANDOFF_TOOL_PARAMETERS.required.includes('action'), true)
+  assert.equal(HANDOFF_TOOL_PARAMETERS.required.includes('target'), true)
+  for (const field of ['ok', 'action', 'outcome', 'code', 'nextAction', 'target', 'required', 'handoffId', 'lease', 'receipt', 'binding', 'capability', 'diagnostics', 'detail']) {
+    assert.equal(Object.hasOwn(HANDOFF_TOOL_OUTPUT_SCHEMA.properties, field), true, 'output schema is missing ' + field)
+  }
+  const definition = handoffToolDefinition({ async invoke() { return { ok: false } } })
+  assert.equal(definition.name, HANDOFF_TOOL)
+  assert.equal(definition.parameters, HANDOFF_TOOL_PARAMETERS)
+  assert.equal(definition.output.schema, HANDOFF_TOOL_OUTPUT_SCHEMA)
+  assert.deepEqual(definition.output.render({}, { ok: true, action: 'check', required: false, nextAction: 'execute' })[0].type, 'text')
+})
+
+test('the entrypoint registers ulw_handoff immediately and fails closed until a real service is attached', async () => {
+  const ctx = fakeCtx()
+  const entry = createReviewEntry(ctx, { config: {}, assemble: async () => scriptedAssembly() })
+  const dispose = entry.start()
+  assert.deepEqual(ctx.registry.registered.map((definition) => definition.name), [REVIEW_TOOL, HANDOFF_TOOL])
+
+  const pending = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(pending.ok, false)
+  assert.equal(pending.code, 'CAPABILITY_UNAVAILABLE')
+  assert.equal(pending.capability.available, false)
+  assert.equal(pending.capability.reason, 'HANDOFF_ASSEMBLY_PENDING')
+  assert.equal(pending.lease, null)
+
+  await entry.ready
+  const half = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(half.ok, false)
+  assert.equal(half.code, 'CAPABILITY_UNAVAILABLE')
+  assert.equal(half.capability.reason, 'HANDOFF_ASSEMBLY_INCOMPLETE')
+  assert.equal(half.lease, null)
+
+  await dispose()
+  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL])
+  const after = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(after.ok, false)
+  assert.equal(after.code, 'CAPABILITY_UNAVAILABLE')
+  assert.equal(after.capability.reason, 'HANDOFF_SHUTTING_DOWN')
+  const again = await dispose()
+  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL], 'a second dispose never re-registers or re-removes')
+  assert.deepEqual(again, { diagnostics: [] })
+})
+
+test('forged or malformed handoff parameters are refused before any service call', async () => {
+  const assembly = scriptedAssembly({}, { handoff: true })
+  const { entry } = entryWith(assembly)
+  await entry.ready
+  const cases = [
+    undefined,
+    null,
+    [],
+    'check',
+    {},
+    { action: 'approve', target: TARGET },
+    { action: 'check' },
+    { action: 'bootstrap' },
+    { action: 'check', target: TARGET, worktreePath: '/tmp/wt' },
+    { action: 'bind-worktree', target: TARGET },
+    { action: 'bind-worktree', target: TARGET, worktreePath: 'relative/wt' },
+    { action: 'check', target: TARGET, approved: true },
+    { action: 'check', target: TARGET, pinDelegated: false },
+    { action: 'bootstrap', target: TARGET, delegated: true },
+    { action: 'check', target: 'docs/plan.md' },
+  ]
+  for (const args of cases) {
+    const value = await entry.handoff.invoke(args, execFor())
+    assert.equal(value.ok, false, JSON.stringify(args))
+    assert.equal(value.code, 'HANDOFF_INVALID_REQUEST', JSON.stringify(args))
+    assert.equal(value.capability.available, true)
+    assert.equal(value.lease, null)
+    assert.equal(value.required, false)
+  }
+  assert.equal(assembly.handoff.calls.length, 0, 'no forged selector may reach the service')
+
+  const valid = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(valid.ok, true)
+  assert.equal(valid.required, false)
+  assert.equal(valid.capability.available, true)
+  assert.equal(valid.lease.handoffId, 'handoff-test')
+  assert.deepEqual(assembly.handoff.calls.map((call) => call.action), ['check'])
+  assert.deepEqual(assembly.handoff.calls[0].request, { action: 'check', target: TARGET })
+  const rendered = handoffToolDefinition(entry.handoff).output.render({}, valid).map((block) => block.text).join('\n')
+  assert.match(rendered, /ulw_handoff check/)
+  assert.match(rendered, /handoff-test/)
+  assert.match(rendered, /nextAction: execute/)
+})
+
+test('dispose revokes the handoff before reviewers settle and unregisters the tools last', async () => {
+  const assembly = scriptedAssembly({}, { handoff: true })
+  const { entry, ctx, dispose } = entryWith(assembly)
+  await entry.ready
+  await dispose()
+  assert.deepEqual(assembly.order, ['handoff:dispose', 'settle', 'close-store', 'release'])
+  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL])
+  await dispose()
+  assert.deepEqual(assembly.order, ['handoff:dispose', 'settle', 'close-store', 'release'], 'idempotent dispose performs no second teardown')
+})
+
+test('a failed assembly surfaces one stable capability code on ulw_handoff, never a lease', async () => {
+  const ctx = fakeCtx()
+  const failure = Object.assign(new Error('store unavailable'), { code: 'STORE_UNAVAILABLE' })
+  const entry = createReviewEntry(ctx, { config: {}, assemble: async () => { throw failure } })
+  const dispose = entry.start()
+  await entry.ready
+  const value = await entry.handoff.invoke({ action: 'bootstrap', target: TARGET }, execFor())
+  assert.equal(value.ok, false)
+  assert.equal(value.code, 'STORE_UNAVAILABLE')
+  assert.equal(value.capability.available, false)
+  assert.equal(value.lease, null)
+  assert.equal(value.receipt, null)
+  await dispose()
+})
+
+test('a half-assembled enhanced install gates product writes and answers one capability code', async () => {
+  const ctx = fakeCtx({ subagents: {}, agentPresets: {}, llm: {}, storage: {} })
+  const entry = createReviewEntry(ctx, { config: {}, assemble: async () => null })
+  const dispose = entry.start()
+  await entry.ready
+  assert.equal(typeof ctx.handoff?.guard, 'function', 'the failed enhanced assembly installs a refusing guard')
+  const writeReason = ctx.handoff.guard({
+    agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
+    name: 'write',
+    arguments: { file_path: 'src/main.js' },
+  })
+  assert.match(writeReason ?? '', /HANDOFF_REVIEW_UNAVAILABLE/)
+  assert.equal(ctx.handoff.guard({
+    agent: { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } },
+    name: 'ulw_handoff',
+    arguments: {},
+  }), undefined)
+  const value = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(value.ok, false)
+  assert.equal(value.code, 'CAPABILITY_UNAVAILABLE')
+  assert.equal(value.lease, null)
+  await dispose()
+  assert.equal(ctx.handoff, undefined)
+})
+
+test('a second start never double-assembles or double-registers the handoff tool', async () => {
+  const assembly = scriptedAssembly({}, { handoff: true })
+  const ctx = fakeCtx()
+  const entry = createReviewEntry(ctx, { config: {}, assemble: async () => assembly })
+  const first = entry.start()
+  const second = entry.start()
+  await entry.ready
+  assert.deepEqual(ctx.registry.registered.map((definition) => definition.name), [REVIEW_TOOL, HANDOFF_TOOL])
+  const value = await entry.handoff.invoke({ action: 'check', target: TARGET }, execFor())
+  assert.equal(value.ok, true)
+  await first()
+  await second()
+  assert.deepEqual(assembly.order, ['handoff:dispose', 'settle', 'close-store', 'release'])
+  assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL])
 })

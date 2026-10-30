@@ -1334,13 +1334,13 @@ function createEntryHost(t, options = {}) {
     host.calls += 1
     return entry.controller.invoke(request, { agent: parent, callId: 'entry-call-' + host.calls, signal: new AbortController().signal })
   }
-  host.deliver = async childId => {
+  host.deliver = async (childId, cursor = 0) => {
     const definition = tools.get('ulw_review_input')
     assert.ok(definition, 'ulw_review_input is registered by the real assembly')
     const callId = 'entry-page-' + (++host.calls)
     const lane = childId.includes('adversarial') ? 'adversarial' : 'practical'
     const agent = { session: { id: childId, header: { cwd: workspace } }, ctx: { preset: REVIEW_LANE_PRESETS[lane] } }
-    const value = definition.execute({}, { agent, callId, signal: new AbortController().signal })
+    const value = await definition.execute(cursor > 0 ? { cursor } : {}, { agent, callId, signal: new AbortController().signal })
     const content = definition.output.render({}, value)
     bus.emit('tools/result', { name: 'ulw_review_input', callId, agent }, { isError: false, value, content })
     return value
@@ -1358,7 +1358,7 @@ test('entry HMR: unload cancels, closes the store and a reload never double-defi
   const first = host.mount()
   await first.ready
   await flush()
-  assert.deepEqual([...host.tools.map.keys()].sort(), ['ulw_review', 'ulw_review_input'])
+  assert.deepEqual([...host.tools.map.keys()].sort(), ['ulw_handoff', 'ulw_review', 'ulw_review_input'])
   assert.equal(host.tools.guards.filter(Boolean).length, 1)
   assert.equal(host.presets.map.size, 2)
 
@@ -1392,7 +1392,7 @@ test('entry HMR: unload cancels, closes the store and a reload never double-defi
   const second = host.mount()
   await second.ready
   await flush()
-  assert.deepEqual([...host.tools.map.keys()].sort(), ['ulw_review', 'ulw_review_input'], 'reload re-registers exactly once')
+  assert.deepEqual([...host.tools.map.keys()].sort(), ['ulw_handoff', 'ulw_review', 'ulw_review_input'], 'reload re-registers exactly once')
   assert.equal(host.tools.guards.filter(Boolean).length, 1)
   assert.equal(host.presets.map.size, 2)
   const afterReload = await host.invoke(second, { action: 'require', target: host.target })
@@ -1407,7 +1407,7 @@ test('entry HMR: unload cancels, closes the store and a reload never double-defi
   assert.equal(host.presets.map.size, 0)
   assert.equal(host.kv.closeCalls, 2)
   assert.equal(host.subagents.activations.every(activation => activation.disposed === true), true)
-  t.diagnostic('HMR: firstDispose=activation->store->guard/preset/tool reloadTools=2 reloadState=' + afterReload.state + ' approved=0 activationsDisposed=2')
+  t.diagnostic('HMR: firstDispose=activation->store->guard/preset/tool reloadTools=3 reloadState=' + afterReload.state + ' approved=0 activationsDisposed=2')
 })
 
 test('matrix closure: no network attempt, no unhandled rejection, no owned handle left', async t => {
@@ -1425,10 +1425,63 @@ test('matrix closure: no network attempt, no unhandled rejection, no owned handl
 // product gaps observed by this matrix, preserved red (not worked around)
 // ---------------------------------------------------------------------------
 
-test('PRODUCT GAP (red): the shipped entry never assembles ulw_handoff or the execute lease guard', {
-  skip: 'observed: lib/index.js does not import createHandoffService, registers only ulw_review, never assigns ctx.handoff, and the execute-mode write/bash guard returns no denial; red probe is in $E/task-15.txt',
-}, () => {
-  assert.fail('lib/index.js must assemble createHandoffService(createStoreApprovalSource(store)) and register the ulw_handoff tool so execute-mode product writes are gated')
+test('the shipped entry assembles ulw_handoff and an execute lease guard that refuses before a required lease', async t => {
+  const host = createEntryHost(t)
+  const entry = host.mount()
+  await entry.ready
+  await flush()
+
+  assert.equal(typeof host.ctx.handoff?.guard, 'function', 'the review sub-effect injects ctx.handoff')
+  assert.ok(host.tools.get('ulw_handoff'), 'the shipped entry registers ulw_handoff')
+
+  const guard = createGuard({
+    sessionProjections: { stateOf: () => ({ mode: 'execute' }) },
+    workingDirectory: { get: () => host.workspace },
+    handoff: host.ctx.handoff,
+  })
+  const exec = (name, args = { file_path: 'src/main.js' }) => ({ name, arguments: args, agent: host.parent })
+
+  assert.match(guard(exec('write')) ?? '', /HANDOFF_LEASE_MISSING/, 'pre-lease product write is denied')
+  assert.match(guard(exec('bash', {})) ?? '', /HANDOFF_LEASE_MISSING/, 'pre-lease bash is denied')
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(guard(exec(name, {})), undefined, name + ' must stay usable before the lease')
+  }
+
+  const required = await host.invoke(entry, { action: 'require', target: host.target })
+  assert.equal(required.phase, 'live')
+  const started = await host.invoke(entry, { action: 'start', target: host.target })
+  assert.equal(started.phase, 'live', JSON.stringify(started.diagnostics))
+  for (const lane of REVIEW_LANES) {
+    const childId = started.lanes.find(view => view.lane === lane).childId
+    let cursor = 0
+    for (let page = 0; page < 16; page += 1) {
+      const value = await host.deliver(childId, cursor)
+      if (value.done === true) break
+      cursor = value.nextCursor
+    }
+  }
+  for (const lane of REVIEW_LANES) {
+    host.subagents.resolve(lane, {
+      version: 1, lane, roundId: started.roundId, launchId: started.launchId,
+      planSha256: started.round.planSha256, verdict: 'OKAY', summary: 'Executable as written.', blockers: [], notes: [],
+    })
+  }
+  const done = await host.invoke(entry, { action: 'wait', roundId: started.roundId })
+  assert.equal(done.approved, true, JSON.stringify(done.diagnostics))
+
+  const checked = await host.tools.get('ulw_handoff').execute(
+    { action: 'check', target: host.target },
+    { agent: host.parent, callId: 'entry-handoff-check', signal: new AbortController().signal },
+  )
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.outcome, 'required_lease')
+  assert.equal(checked.lease.required, true)
+  assert.equal(guard(exec('write')), undefined, 'a required lease unlocks the product write')
+  assert.equal(guard(exec('bash', {})), undefined, 'a required lease unlocks bash')
+
+  await entry.dispose()
+  assert.equal(host.ctx.handoff, undefined, 'dispose removes the injected handoff guard')
+  t.diagnostic('entry handoff: registered=3 preLeaseWrite=HANDOFF_LEASE_MISSING preLeaseBash=HANDOFF_LEASE_MISSING requiredLease=yes postLeaseWrite=allowed postLeaseBash=allowed')
 })
 
 test('PRODUCT GAP (red): a fresh required handoff check after a legal status tick refuses', {
