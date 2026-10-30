@@ -300,6 +300,19 @@ test('an unreadable handoff state fails closed as capability, never as an accept
   assert.match(asyncResult.text, /CAPABILITY_UNAVAILABLE/)
   assert.equal(asyncSetup.router.calls.length, 0)
   assert.equal(asyncSetup.agent.followups.length, 0)
+
+  // A rejecting asynchronous lookup answers the same envelope and leaves no
+  // unhandledRejection behind (row 35); the child-process proof lives in
+  // test/review-tools.test.mjs.
+  const rejectingSetup = reviewSetup('execute', {
+    stateForSession: () => Promise.reject(new Error('handoff lease storage unavailable')),
+  })
+  const rejectingResult = await rejectingSetup.invokeReview()
+  assert.equal(rejectingResult.kind, 'error')
+  assert.match(rejectingResult.text, /CAPABILITY_UNAVAILABLE/)
+  assert.equal(rejectingResult.text.includes('HANDOFF_ACTIVE_EXECUTE'), false)
+  assert.equal(rejectingSetup.router.calls.length, 0)
+  assert.equal(rejectingSetup.agent.followups.length, 0)
 })
 
 test('plan and off modes still accept the round and never consult an execute lease', async () => {

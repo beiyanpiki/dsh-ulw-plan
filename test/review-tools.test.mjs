@@ -8,6 +8,7 @@
  * scripted assembly only - no Host, no model, no clock, no sleep.
  */
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 import {
   HANDOFF_ACTIONS,
@@ -19,7 +20,6 @@ import {
   REVIEW_TOOL,
   REVIEW_TOOL_OUTPUT_SCHEMA,
   REVIEW_TOOL_PARAMETERS,
-  activeExecuteLease,
   buildReviewEnvelope,
   capabilityStatus,
   createReviewEntry,
@@ -29,6 +29,7 @@ import {
   reviewLeaseGate,
   reviewToolDefinition,
 } from '../lib/review-tools.js'
+import { ULW_REVIEW_COMMAND, activeExecuteLease, registerCommands } from '../lib/commands.js'
 
 const TARGET = '.dsh/ulw/plans/demo.md'
 const TARGET_ABS = '/tmp/ulw-review-entry-workspace/.dsh/ulw/plans/demo.md'
@@ -799,26 +800,30 @@ test('row 34: status, wait and cancel keep their semantics while an execute leas
   assert.deepEqual(calls, [], 'status/wait/cancel never consult the execute lease')
   await dispose()
 })
-test('row 34: the shared lease predicate matches the command for every handoff snapshot', () => {
+test('row 34/35: the shared lease predicate matches the command for every handoff snapshot', () => {
   const agent = { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } }
   const handoffOf = (value) => ({ calls: [], stateForSession() { this.calls.push('session-1'); return value } })
+  // The predicate lives in lib/commands.js and takes the Host context both
+  // entries hand it; only its `handoff` member is read.
+  const scopeOf = (handoff) => ({ handoff })
 
   // No authority, no session identity, or no state: nothing can be leased.
   assert.deepEqual(activeExecuteLease(undefined, agent), { known: true, active: false })
   assert.deepEqual(activeExecuteLease({}, agent), { known: true, active: false })
-  assert.deepEqual(activeExecuteLease(handoffOf(null), agent), { known: true, active: false })
-  assert.deepEqual(activeExecuteLease(handoffOf(undefined), agent), { known: true, active: false })
-  assert.deepEqual(activeExecuteLease(handoffOf({ status: 'leased', lease: null }), agent), { known: true, active: false })
-  assert.deepEqual(activeExecuteLease(handoffOf({ status: 'revoked', lease: { handoffId: 'h' } }), agent), { known: true, active: false })
-  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot()), { session: { header: {} } }), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf(null)), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf(undefined)), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf({ status: 'leased', lease: null })), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf({ status: 'revoked', lease: { handoffId: 'h' } })), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf(executeLeaseSnapshot())), { session: { header: {} } }), { known: true, active: false })
 
   // A lease in leased or bound status is the one active-execute refusal.
-  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot({ status: 'leased' })), agent), { known: true, active: true })
-  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot({ status: 'bound' })), agent), { known: true, active: true })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf(executeLeaseSnapshot({ status: 'leased' }))), agent), { known: true, active: true })
+  assert.deepEqual(activeExecuteLease(scopeOf(handoffOf(executeLeaseSnapshot({ status: 'bound' }))), agent), { known: true, active: true })
 
-  // A throwing or asynchronous lookup is never a lease snapshot.
-  assert.deepEqual(activeExecuteLease({ stateForSession() { throw new Error('unreadable') } }, agent), { known: false, active: false })
-  assert.deepEqual(activeExecuteLease({ stateForSession: async () => executeLeaseSnapshot() }, agent), { known: false, active: false })
+  // A throwing, asynchronous or rejecting lookup is never a lease snapshot.
+  assert.deepEqual(activeExecuteLease(scopeOf({ stateForSession() { throw new Error('unreadable') } }), agent), { known: false, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf({ stateForSession: async () => executeLeaseSnapshot() }), agent), { known: false, active: false })
+  assert.deepEqual(activeExecuteLease(scopeOf({ stateForSession() { return Promise.reject(new Error('rejected')) } }), agent), { known: false, active: false })
 
   // The mode gate: only execute consults the handoff at all.
   const calls = []
@@ -834,4 +839,109 @@ test('row 34: the shared lease predicate matches the command for every handoff s
   assert.match(refused.detail, /ulw_handoff check/)
   ctx.handoff = { stateForSession() { throw new Error('unreadable') } }
   assert.equal(reviewLeaseGate(ctx, agent).code, 'CAPABILITY_UNAVAILABLE')
+})
+
+test('row 35 parity: all 15 probed states answer the same code on the command and the tool', () => {
+  const agentOf = (session = { id: 'session-1', header: { cwd: '/tmp/ws' } }) => ({ session, followup() {} })
+  const handoffOf = (value) => ({ calls: [], stateForSession() { this.calls.push('session-1'); return value } })
+  const throwing = { stateForSession() { throw new Error('handoff lease storage unavailable') } }
+  const pending = { stateForSession() { return new Promise(() => {}) } }
+  const rejecting = { stateForSession() { return Promise.reject(new Error('handoff lease storage unavailable')) } }
+  const rows = [
+    ['execute/leased', 'execute', handoffOf(executeLeaseSnapshot({ status: 'leased' })), 'HANDOFF_ACTIVE_EXECUTE'],
+    ['execute/bound', 'execute', handoffOf(executeLeaseSnapshot({ status: 'bound' })), 'HANDOFF_ACTIVE_EXECUTE'],
+    ['execute/revoked', 'execute', handoffOf({ status: 'revoked', lease: { handoffId: 'h' } }), 'ACCEPT'],
+    ['execute/cancelled', 'execute', handoffOf({ status: 'cancelled', lease: { handoffId: 'h' } }), 'ACCEPT'],
+    ['execute/stale', 'execute', handoffOf({ status: 'stale', lease: { handoffId: 'h' } }), 'ACCEPT'],
+    ['execute/required-no-lease', 'execute', handoffOf({ status: 'required', lease: null }), 'ACCEPT'],
+    ['execute/no-lease', 'execute', handoffOf({ status: 'off', lease: null }), 'ACCEPT'],
+    ['execute/no-state', 'execute', handoffOf(null), 'ACCEPT'],
+    ['execute/no-handoff', 'execute', undefined, 'ACCEPT'],
+    ['execute/throwing', 'execute', throwing, 'CAPABILITY_UNAVAILABLE'],
+    ['execute/pending', 'execute', pending, 'CAPABILITY_UNAVAILABLE'],
+    ['execute/rejecting', 'execute', rejecting, 'CAPABILITY_UNAVAILABLE'],
+    ['plan/active-lease', 'plan', handoffOf(executeLeaseSnapshot()), 'ACCEPT'],
+    ['off/active-lease', 'off', handoffOf(executeLeaseSnapshot()), 'ACCEPT'],
+    ['execute/unidentifiable-session', 'execute', handoffOf(executeLeaseSnapshot()), 'ACCEPT', agentOf({ header: {} })],
+  ]
+
+  // The command answers free text and the tool answers an envelope code; both
+  // are classified by the stable code they expose, ACCEPT meaning the lease
+  // gate let the request through to its ordinary target handling.
+  const classify = (value) => {
+    if (!value || value.kind !== 'error') return 'ACCEPT'
+    if (value.text.includes('HANDOFF_ACTIVE_EXECUTE')) return 'HANDOFF_ACTIVE_EXECUTE'
+    if (value.text.includes('CAPABILITY_UNAVAILABLE')) return 'CAPABILITY_UNAVAILABLE'
+    return 'ACCEPT'
+  }
+
+  for (const [name, mode, handoff, expected, agent = agentOf()] of rows) {
+    const definitions = []
+    const ctx = {
+      commands: { register(definition) { definitions.push(definition); return () => {} } },
+      sessionProjections: { stateOf: (_session, key) => (key === 'ulwMode' ? { mode } : undefined) },
+      workingDirectory: { get: () => '/tmp/ws' },
+    }
+    if (handoff !== undefined) ctx.handoff = handoff
+    registerCommands(ctx)
+    const review = definitions.find((definition) => definition.name === ULW_REVIEW_COMMAND)
+    assert.ok(review, name + ' registered /ulw-review')
+    const commandCode = classify(review.handler({ rawInput: 'not-a-plan.md', agent }))
+    const gate = reviewLeaseGate(ctx, agent)
+    const toolCode = gate === null ? 'ACCEPT' : gate.code
+    assert.equal(commandCode, expected, name + ' command code')
+    assert.equal(toolCode, expected, name + ' tool code')
+    assert.equal(commandCode, toolCode, name + ' command/tool parity')
+    if (mode !== 'execute') assert.deepEqual(handoff.calls, [], name + ' must not consult the execute lease')
+  }
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 35: one shared lease predicate, lookup rejections contained
+// ---------------------------------------------------------------------------
+
+test('row 35: a rejecting async lease lookup escapes neither entry as an unhandled rejection', () => {
+  const commandsUrl = new URL('../lib/commands.js', import.meta.url).href
+  const toolsUrl = new URL('../lib/review-tools.js', import.meta.url).href
+  // A child process is the only faithful probe: Node turns an unhandled
+  // rejection into a non-zero exit, which an in-process assertion cannot show.
+  const script = `
+    import { registerCommands } from ${JSON.stringify(commandsUrl)}
+    import { reviewLeaseGate } from ${JSON.stringify(toolsUrl)}
+
+    const agent = { session: { id: 'session-1', header: { cwd: '/tmp/ws' } }, followup() {} }
+    const handoff = {
+      stateForSession() { return Promise.reject(new Error('handoff lease storage unavailable')) },
+    }
+    const definitions = []
+    const ctx = {
+      definitions,
+      commands: { register(definition) { definitions.push(definition); return () => {} } },
+      sessionProjections: { stateOf: (_session, key) => (key === 'ulwMode' ? { mode: 'execute' } : undefined) },
+      workingDirectory: { get: () => '/tmp/ws' },
+      handoff,
+    }
+    registerCommands(ctx)
+    const review = definitions.find((definition) => definition.name === 'ulw-review')
+    const command = review.handler({ rawInput: '.dsh/ulw/plans/demo.md', agent })
+    const gate = reviewLeaseGate(ctx, agent)
+    // Yield to the even loop so a rejected lookup would surface here, not later.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    process.stdout.write(JSON.stringify({
+      commandKind: command.kind,
+      commandText: command.text,
+      gateCode: gate === null ? null : gate.code,
+    }) + '\\n')
+  `
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 120000,
+  })
+  assert.equal(child.status, 0, 'the rejecting lookup must not kill the process; stderr: ' + child.stderr)
+  assert.equal(/ERR_UNHANDLED_REJECTION|unhandledRejection/.test(child.stderr), false, child.stderr)
+  const result = JSON.parse(child.stdout.trim().split('\n').pop())
+  assert.equal(result.commandKind, 'error')
+  assert.match(result.commandText, /CAPABILITY_UNAVAILABLE/)
+  assert.equal(result.commandText.includes('HANDOFF_ACTIVE_EXECUTE'), false, 'a failed lookup is not a lease refusal')
+  assert.equal(result.gateCode, 'CAPABILITY_UNAVAILABLE')
 })
