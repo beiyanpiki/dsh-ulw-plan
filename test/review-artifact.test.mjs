@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createReviewArtifact, resolveReviewSource, computeInstructionSha256, readArtifactPage, revalidateReviewArtifact, MAX_PAGE_BYTES } from '../lib/review-artifact.js'
-import { isCanonicalPlanSlug } from '../lib/review-lint.js'
-import { applyTick } from '../skills/ulw-execute/scripts/plan-state.mjs'
+import { isCanonicalPlanSlug, lintPlan } from '../lib/review-lint.js'
+import { applyTick, parseRows } from '../skills/ulw-execute/scripts/plan-state.mjs'
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const plan = '# 计划 😀\r\n## Todos\r\n- [ ] 1. implement\r\n  QA: assert bytes\r\n## Final verification wave\r\n- [ ] F1. audit\r\n## Success criteria\r\n- [ ] 9. not a task\r\n'
 async function fixture(t, bytes = plan) {
@@ -401,4 +401,167 @@ test('nested and fenced text edits change instruction identity; snapshot digest 
   const changed = []
   for (let i = 0; i < original.length; i += 1) if (original[i] !== ticked[i]) changed.push(i)
   assert.deepEqual(changed, [original.indexOf(Buffer.from('- [ ] 1.')) + 3])
+})
+// --- Row 26: the instruction scan's context model must equal plan-state's -----
+// plan-state is the execution contract: it skips a closed frontmatter block, treats
+// a first-line BOM as metadata, and owns the comment/quote/fence state. Every fixture
+// below is a lint-valid canonical plan whose rows plan-state can legally tick.
+const MATRIX_TICK = String.fromCharCode(96)
+const MATRIX_ROW_SLOTS = [
+  '  Recommended task executor category: quick - mechanical',
+  '  What to do / Must NOT do: keep every byte.',
+  '  References: ' + MATRIX_TICK + '$E/x.txt' + MATRIX_TICK,
+  '  Acceptance criteria: lint stays valid.',
+  '  QA scenarios: matrix tick.',
+  '  Commit: Y | test(plan): x',
+]
+const MATRIX_FINAL_SLOTS = [
+  '  Recommended task executor category: unspecified-high - audit',
+  '  What to do / Must NOT do: audit every byte.',
+  '  Acceptance criteria: audit stays valid.',
+  '  QA scenarios: audit tick.',
+  '  Commit: Y | test(plan): audit',
+]
+const matrixRow = (status = ' ') => ['- [' + status + '] 1. TASK-TITLE', ...MATRIX_ROW_SLOTS]
+const matrixFinalRow = (status = ' ') => ['- [' + status + '] F1. FINAL-TITLE', ...MATRIX_FINAL_SLOTS]
+
+/** Compose a canonical plan from independent context fragments. */
+function matrixPlan({ frontmatter = [], prefix = [], mid = [], bom = false } = {}) {
+  const lines = [
+    ...frontmatter,
+    ...prefix,
+    '## Todos',
+    ...matrixRow(),
+    'CTX-MARKER prose',
+    ...mid,
+    '## Final verification wave',
+    ...matrixFinalRow(),
+  ]
+  if (bom) lines[0] = '\uFEFF' + lines[0]
+  return lines
+}
+
+/** Rewrite one row's starting status without touching any other byte. */
+function matrixStatus(content, id, status) {
+  const title = id === 'F1' ? 'FINAL-TITLE' : 'TASK-TITLE'
+  const marker = '- [ ] ' + id + '. ' + title
+  assert.equal(content.split(marker).length, 2, 'row marker ' + marker + ' must be unique')
+  return content.replace(marker, '- [' + status + '] ' + id + '. ' + title)
+}
+
+const SIX_CONTEXT_CLASSES = [
+  ['BOM before the first canonical heading', { bom: true }],
+  ['fence opened in frontmatter', { frontmatter: ['---', '~~~', '---'] }],
+  ['comment opened in frontmatter', { frontmatter: ['---', '<!--', '---'] }],
+  ['fence opened after a comment close', { prefix: ['<!--', '-->~~~'] }],
+  ['fence opened while execution is inside a quoted HTML comment', { prefix: ['> <!--', '~~~', '-->'] }],
+  ['frontmatter row duplicating an executable id', { frontmatter: ['---', '## Todos', '- [ ] 1. duplicate', '---'] }],
+]
+
+test('the six reproduced context classes keep instruction identity for legal ticks', () => {
+  for (const [name, options] of SIX_CONTEXT_CLASSES) {
+    for (const eol of ['\n', '\r\n']) {
+      const content = matrixPlan(options).join(eol)
+      const label = name + ' ' + (eol === '\n' ? 'LF' : 'CRLF')
+      const lint = lintPlan({ content })
+      assert.equal(lint.valid, true, label + ': ' + JSON.stringify(lint.diagnostics))
+      assert.deepEqual(parseRows(content).map(row => row.id), ['1', 'F1'], label)
+      for (const [id, to] of [['1', 'x'], ['1', '~'], ['F1', 'x'], ['F1', '~']]) {
+        const ticked = applyTick(content, id, to)
+        assert.equal(ticked.changed, true, label)
+        assert.equal(computeInstructionSha256(ticked.content), computeInstructionSha256(content), label + ' ' + id + ' -> ' + to)
+      }
+      for (const [from, to] of [['TASK-TITLE', 'TASK-TITLE-edited'], ['matrix tick', 'matrix tick edited'], ['CTX-MARKER prose', 'CTX-MARKER prose edited']]) {
+        assert.notEqual(computeInstructionSha256(content.replace(from, to)), computeInstructionSha256(content), label + ' edit ' + from)
+      }
+    }
+  }
+})
+
+test('context matrix: every plan-state tick on a lint-valid plan keeps instruction identity', () => {
+  const frontmatters = [
+    ['none', []],
+    ['yaml', ['---', 'title: matrix', '---']],
+    ['yaml fence', ['---', '~~~', '---']],
+    ['yaml comment', ['---', '<!--', '---']],
+    ['yaml duplicate row', ['---', '## Todos', '- [ ] 1. duplicate', '---']],
+    ['yaml final heading', ['---', '## Final verification wave', '---']],
+  ]
+  const prefixes = [
+    ['none', []],
+    ['prose', ['prefix prose']],
+    ['scope heading', ['## Scope', 'scope prose']],
+    ['fence demo', ['~~~md', '## Todos', '- [ ] 9. fenced demo', '~~~']],
+    ['comment demo', ['<!--', '## Todos', '- [ ] 9. commented demo', '-->']],
+    ['comment close then fence', ['<!--', '-->~~~']],
+    ['quoted comment', ['> <!--', '~~~', '-->']],
+    ['quoted comment close', ['<!--', '> -->']],
+    ['html prose', ['<div>', 'html prose', '</div>']],
+  ]
+  const mids = [
+    ['none', []],
+    ['h3 notes', ['### Notes', 'note prose']],
+    ['fence demo', ['~~~md', '- [ ] 9. fenced demo', '~~~']],
+    ['comment demo', ['<!--', '- [ ] 9. commented demo', '-->']],
+    ['quoted row', ['> - [ ] 9. quoted demo']],
+    ['comment close then fence', ['<!--', '-->~~~']],
+    ['quoted comment', ['> <!--', '~~~', '-->']],
+    ['html prose', ['<div>', 'html prose', '</div>']],
+  ]
+  const edits = [['TASK-TITLE', 'TASK-TITLE-edited'], ['matrix tick', 'matrix tick edited'], ['CTX-MARKER prose', 'CTX-MARKER prose edited']]
+  let fixtures = 0
+  let ticks = 0
+  let editChecks = 0
+  let failures = 0
+  const firstFailures = []
+  const fail = message => { failures += 1; if (firstFailures.length < 12) firstFailures.push(message) }
+  for (const [frontName, frontmatter] of frontmatters) {
+    for (const [prefixName, prefix] of prefixes) {
+      for (const [midName, mid] of mids) {
+        for (const bom of [false, true]) {
+          for (const eol of ['\n', '\r\n']) {
+            const content = matrixPlan({ frontmatter, prefix, mid, bom }).join(eol)
+            const label = [frontName, prefixName, midName, bom ? 'bom' : 'no-bom', eol === '\n' ? 'LF' : 'CRLF'].join('/')
+            fixtures += 1
+            const lint = lintPlan({ content })
+            if (!lint.valid) {
+              fail(label + ' lint=' + JSON.stringify(lint.diagnostics.filter(diagnostic => diagnostic.severity === 'error')))
+              continue
+            }
+            const rows = parseRows(content)
+            if (rows.length !== 2 || rows[0].id !== '1' || rows[1].id !== 'F1') {
+              fail(label + ' plan-state rows=' + JSON.stringify(rows.map(row => row.id)))
+              continue
+            }
+            for (const row of rows) {
+              for (const start of [' ', 'x', '~']) {
+                for (const to of ['x', '~']) {
+                  if (start === to) continue
+                  const variant = matrixStatus(content, row.id, start)
+                  if (!lintPlan({ content: variant }).valid) {
+                    fail(label + ' status variant invalid ' + row.id + ' ' + start)
+                    continue
+                  }
+                  const ticked = applyTick(variant, row.id, to)
+                  ticks += 1
+                  if (!ticked.changed) { fail(label + ' ' + row.id + ' ' + start + '->' + to + ' not changed'); continue }
+                  if (computeInstructionSha256(ticked.content) !== computeInstructionSha256(variant)) fail(label + ' ' + row.id + ' ' + start + '->' + to + ' changed instruction identity')
+                  if (hash(ticked.content) === hash(variant)) fail(label + ' ' + row.id + ' ' + start + '->' + to + ' did not change raw identity')
+                }
+              }
+            }
+            for (const [from, to] of edits) {
+              editChecks += 1
+              if (computeInstructionSha256(content.replace(from, to)) === computeInstructionSha256(content)) fail(label + ' edit ' + from + ' did not change instruction identity')
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.equal(fixtures, 1728, 'context matrix fixture count')
+  assert.equal(ticks, 13824, 'legal status flips checked')
+  assert.equal(editChecks, 5184, 'instruction edits checked')
+  assert.equal(failures, 0, failures + ' failures; first: ' + firstFailures.join(' | '))
+  console.log('row-26 matrix: fixtures=' + fixtures + ' legalTicks=' + ticks + ' instructionEdits=' + editChecks)
 })

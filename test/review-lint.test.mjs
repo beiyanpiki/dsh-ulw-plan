@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { createReviewArtifact, revalidateReviewArtifact } from '../lib/review-artifact.js'
+import { createReviewArtifact, instructionHtmlLines, revalidateReviewArtifact } from '../lib/review-artifact.js'
 import { CANONICAL_PLAN_SLUG_RE, ERROR_CODES, PLAN_LINT_CODES, isCanonicalPlanSlug, lintPlan, parsePlanDocument, planSlugFromPath } from '../lib/review-lint.js'
 import { parseReviewRequest } from '../lib/review-protocol.js'
 import { computeInstructionSha256 } from '../lib/review-artifact.js'
@@ -747,4 +747,39 @@ test('instruction-mode revalidation would go stale on the tick lint now refuses'
   const revalidated = await revalidateReviewArtifact(artifact, { mode: 'instruction' })
   assert.equal(revalidated.valid, false)
   assert.equal(revalidated.stale, true)
+})
+
+// --- Row 26: the HTML tracker below is the bound reader's own context machine, not a
+// copy. This pins the shared helper to lint's verdict: every canonical heading or task
+// row the tracker marks hidden must be refused, and nothing else may be.
+test('the HTML context tracker is shared with the bound reader, not a drifting copy', () => {
+  assert.equal(typeof instructionHtmlLines, 'function')
+  let fixtures = 0
+  for (const [name, lines] of [...HTML_DIVERGENT, ...HTML_LEGAL]) {
+    for (const eol of ['\n', '\r\n']) {
+      const content = lines.join(eol)
+      fixtures += 1
+      const model = parsePlanDocument(content)
+      // The tracker receives the same line array lint's scanner sees: LF-split with a
+      // retained (or already stripped) CR. It strips one trailing CR itself.
+      const hidden = instructionHtmlLines(content.split('\n'))
+      const expected = [
+        ...model.sections.filter(section => hidden[section.line - 1]).map(section => 'SECTION_HTML_BLOCK@' + section.line),
+        ...model.tasks.filter(task => hidden[task.line - 1]).map(task => 'TASK_ROW_HTML_BLOCK@' + task.line),
+        ...model.outOfSection.filter(task => hidden[task.line - 1]).map(task => 'TASK_ROW_HTML_BLOCK@' + task.line),
+      ].sort()
+      const actual = lintPlan({ content }).diagnostics
+        .filter(diagnostic => diagnostic.code === 'SECTION_HTML_BLOCK' || diagnostic.code === 'TASK_ROW_HTML_BLOCK')
+        .map(diagnostic => diagnostic.code + '@' + diagnostic.line)
+        .sort()
+      assert.deepEqual(actual, expected, name + ' ' + JSON.stringify(eol) + ': hidden flags and lint diagnostics must agree')
+    }
+  }
+  assert.equal(fixtures, 44, 'HTML corpus x LF/CRLF')
+  // A line the tracker marks hidden is exactly what makes the legal tick stale: the
+  // artifact refuses to normalize it, which is why lint must refuse the plan.
+  const content = ROW_IN_DIV.join('\n')
+  const hidden = instructionHtmlLines(content.split('\n'))
+  assert.equal(hidden[2], true, 'the row at line 3 is inside the div for the tracker')
+  assert.notEqual(computeInstructionSha256(applyTick(content, '1', 'x').content), computeInstructionSha256(content))
 })
