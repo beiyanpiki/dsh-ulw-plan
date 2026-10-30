@@ -173,7 +173,7 @@ Every `task` call is self-contained: the child does not inherit this conversatio
 | `momus` | `plan-reviewer` | same as `plan-reviewer` |
 | `oracle` | `plan-reviewer` | same as `plan-reviewer` |
 
-`momus` and `oracle` are separate fresh-preset children, so the dual high-accuracy review keeps its independence. In `mode = execute`, every consultant/reviewer type is refused: review ends when execution starts.
+`momus` and `oracle` are separate fresh-preset children, so the dual high-accuracy review keeps its independence. A3 ended consultant/reviewer work when execution started; that is history, not the current contract (section 10): `/ulw-consult` still refuses in execute, while `/ulw-review` is refused only while an active execution lease is held; execute without a lease accepts one round that is not a completed review.
 
 ## Category semantics
 
@@ -219,7 +219,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 2. ~~没有 `task_output` / `task_send` / `task_cancel`~~（A4 后委托走原生 `subagent`，通知与 `send_message` / `interrupt_agent` 均为 Host 自带）。
 3. 没有 continuation hook：`create_goal` 承担；P7 可补 `agent/turn-stopping`。
 4. ~~`category` 不选模型、不传 preset~~（A4 后 `category` 连参数都不是，只是 prompt 词汇）。
-5. ~~plan-gate 三条件~~（A4 后由命令校验承担：`/ulw-review` 校验唯一目标，两条角色命令在 `execute` 模式拒绝）。
+5. ~~plan-gate 三条件~~（A4 后由命令校验承担：`/ulw-review` 校验唯一目标；`/ulw-consult` 在 `execute` 模式拒绝，`/ulw-review` 只在会话持有 active 执行 lease 时以 `HANDOFF_ACTIVE_EXECUTE` 拒绝，未持 lease 的 execute 仍接受一轮但只算「已接受、未完成」）。
 6. 新增 `/ulw-mode off|plan|execute` 逃生口（omo 没有）。
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
 8. guard 在 **plan 模式**只拦 `write` / `edit`，不拦 `bash`（与 omo 的 prometheus-md-only 一致；`scaffold-plan.mjs` 靠 bash 产出文件）。**execute 模式**的 `bash`、`run_code`、产品写入与实现委托由 `ulw_handoff` 执行 lease 门禁：未取得 lease 前拒绝（第 10.2 节）。
@@ -254,7 +254,7 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 | --- | --- | --- |
 | `lib/presets.js` | 注册 4 个只读 preset（explore / librarian / plan-consultant / plan-reviewer，`omo ` 前缀） | 角色契约注入（consult/review 命令）+ 研究车道模板（原生 `subagent` 派发） |
 | `lib/task-tool.js` | omo `task` 委托面的内联移植（`subagent_type` + `category` + 深度闸） | Host 原生 `subagent` / `subagent_fork` / `send_message` / `interrupt_agent` |
-| `lib/gate.js` | plan-gate 三条件（mode、产物、唯一 plan 路径） | `/ulw-review` 的目标校验（`lib/commands.js` 的 `resolveReviewTarget`）+ execute 模式拒绝 |
+| `lib/gate.js` | plan-gate 三条件（mode、产物、唯一 plan 路径） | `/ulw-review` 的目标校验（`lib/commands.js` 的 `resolveReviewTarget`）+ active 执行 lease 拒绝（A5 起；plan/off 与未持 lease 的 execute 可发起，见第 10 节） |
 | `prompts/explore.md`、`prompts/librarian.md` | preset persona | 折叠进 `references/research-lanes.md` 的车道模板（改写：LSP→grep/glob/read，bash broker→web_search/web_fetch，`%%CURRENT_YEAR%%` 令牌改为相对表述） |
 
 ### 9.2 移动（字节不变，仅换目录）
@@ -291,7 +291,7 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 
 1. **high-accuracy 评审并入 plan 步骤**：评审是规划会话内的工作流步骤（同一契约、单车道、有界收敛、草稿内轮次收据 + 交付前活体摘要复验），不再派生 momus/oracle 子代理；`/ulw-review` 是用户按需触发同一契约的会话内命令。
 2. **explore / librarian 集成而非独立 agent**：研究车道是提示词模板，经 Host 原生 `subagent` / `subagent_fork` 派发；规划会话自身的 read / glob / grep / web 工具也始终可用。
-3. **consultant / reviewer 只以命令提供**：`/ulw-consult`、`/ulw-review` 在对话中直接调用（`execute` 模式拒绝，命令文本给出退出口）；plan 工作流内部则直接采纳 references 里的同一契约，不经命令。
+3. **consultant / reviewer 只以命令提供**：`/ulw-consult`、`/ulw-review` 在对话中直接调用；`/ulw-consult` 在 `execute` 模式拒绝，`/ulw-review` 只在会话持有 active 执行 lease 时以 `HANDOFF_ACTIVE_EXECUTE` 拒绝（未持 lease 的 execute 接受一轮、回执只表示已接受），拒绝文本给出退出口；plan 工作流内部则直接采纳 references 里的同一契约，不经命令。
 4. **评审独立性换形**：双 fresh-preset 子代理的独立性由「契约驱动 + 磁盘重读 + 摘要锚定 + 有界收敛」承担——这是与 omo 的真实行为差异，不是缺陷隐瞒。
 
 ## 10. A5：Host 双评审与执行交接（2026-10-30）
@@ -308,7 +308,7 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 
 ### 10.2 运行面（现行）
 
-- 工具：`ulw_review`（`require|start|wait|status|cancel`）与 `ulw_handoff`（`check|bootstrap|bind-worktree`）；`/ulw-review` 与工具共享同一协调器，命令只返回「已接受，未完成」的回执。
+- 工具：`ulw_review`（`require|start|wait|status|cancel`）与 `ulw_handoff`（`check|bootstrap|bind-worktree`）；`/ulw-review` 与工具共享同一协调器，命令只返回「已接受，未完成」的回执。会话持有 active 执行 lease（`leased`/`bound`）时，命令以 `HANDOFF_ACTIVE_EXECUTE` 拒绝且不接受轮次；未持 lease 的 execute 仍可接受一轮，plan/off 不查 lease。
 - 两车道 `practical` / `adversarial` 各用 namespaced preset（`ulw-plan-review-practical` / `ulw-plan-review-adversarial`），`provider:'spawn'`、`delivery:'caller'`、显式 `agentOptions` 与受支持 `outputSchema`；两路一起发起，首份结果不回喂第二路。
 - 输入：服务一次读取不可变 Buffer，身份为 canonical workspace + `.dsh/ulw/plans/<slug>.md` + raw SHA-256；reviewer 只能通过 `ulw_review_input` 分页（至多 16 KiB/页）读取，覆盖连续完整后才允许证据工具与结构化结果。
 - 状态：Host storage 中一个计划一个 record（requirements、current round、history、source/policy/contract hashes、两 lane receipt）；`approved` 需要两个完整、绑定同一 round/launch/source 的终态回执。draft/OKAY 文本永远不是批准。

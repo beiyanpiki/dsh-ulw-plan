@@ -38,7 +38,7 @@ Translate any Codex-only tool name in an inherited example to its DeepSeek Harne
 
 | Codex example | DSH tool to use |
 | --- | --- |
-| final-review `task(...)` / reviewer `spawn_agent` | `subagent({description, prompt})` with a fresh independent reviewer prompt for the PRODUCT diff, QA and fidelity; `/ulw-review` reviews the PLAN only and is refused in execute mode, so it is never a substitute for F2 code review |
+| final-review `task(...)` / reviewer `spawn_agent` | `subagent({description, prompt})` with a fresh independent reviewer prompt for the PRODUCT diff, QA and fidelity; `/ulw-review` reviews the PLAN only and is refused with `HANDOFF_ACTIVE_EXECUTE` once the session holds an active execution lease (before a lease it only accepts a review round), so it is never a substitute for F2 code review |
 | execution handoff / worktree / bootstrap | `ulw_handoff` actions `check`, `bootstrap`, `bind-worktree`; parameters are selectors only (canonical target, absolute worktree path) |
 | worker `multi_agent_v1.spawn_agent({"message":"TASK: act as <role>. ..."})` | `subagent({description, prompt})` — the native tool; put the role AND the `Recommended task executor category:` tier into the prompt text (e.g. "You are a quick-tier worker: mechanical, single-file"). `subagent_fork` only when the child truly needs this session's context |
 | `multi_agent_v1.wait_agent(...)` / `background_output(task_id=…)` | not needed: the native tools notify you in-session when a child finishes; between notifications keep working or end the turn - never poll |
@@ -285,6 +285,6 @@ F1-F4 verify the LANDED product: F1 plan compliance, F2 independent code-quality
 - No stale-memory execution. The plan and ledger are the durable source of truth.
 - **No product side effect before trusted handoff.** `ulw_handoff` action `check` must return a lease with `nextAction: "execute"` (plus a successful `bind-worktree` in a worktree) before any product write, shell command, implementation spawn or worktree edit. A required plan without a persisted Host dual approval never executes.
 - **No hand-filled approval.** A draft OKAY, a copied receipt, a hand-written lease or an old round is never authority; only the Host's `approved: true` + `completed: true` after both lane receipts, followed by `ulw_handoff check`, authorizes required execution.
-- **No plan review as product acceptance.** F1-F4 use fresh product reviewers and real QA; `/ulw-review` or `ulw_review` review the plan only and are refused during an active execute.
+- **No plan review as product acceptance.** F1-F4 use fresh product reviewers and real QA; `/ulw-review` and `ulw_review` review the plan only, the slash command is refused while the session holds an active execution lease, and neither is a substitute for F1-F4.
 - **No overwriting or migrating old artifacts.** Never overwrite an existing draft or plan, and never migrate its OKAY into a Host approval; the scaffold's no-op is the resume contract.
 - **Bootstrap only through the narrow interface.** In execute, a no-plan bootstrap calls `ulw_handoff` action `bootstrap`; it never shells out to `scaffold-plan.mjs` or hand-creates plan artifacts.
