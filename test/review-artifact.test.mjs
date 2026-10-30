@@ -48,6 +48,18 @@ test('only section-local legal status bytes normalize; all instruction bytes mat
   }
 })
 
+test('status offsets are verified on raw bytes: BOM rows and de-listing never normalize', () => {
+  const canonical = '## Todos\n- [ ] 1. canonical\n'
+  assert.equal(computeInstructionSha256(canonical), computeInstructionSha256(canonical.replace('- [ ]', '- [x]')))
+  const bom = '## Todos\n\uFEFF- [ ] 1. a\n'
+  const delisted = '## Todos\n\uFEFF  [ ] 1. a\n'
+  const ticked = '## Todos\n\uFEFF- [x] 1. a\n'
+  const original = computeInstructionSha256(bom)
+  assert.notEqual(computeInstructionSha256(delisted), original, 'de-listing a BOM row must change identity')
+  assert.notEqual(computeInstructionSha256(ticked), original, 'ticking a BOM row must change identity')
+  assert.notEqual(computeInstructionSha256(delisted), computeInstructionSha256(ticked))
+})
+
 test('fenced, quoted, nested, commented, wrong-section and nested-heading rows stay instructional', () => {
   const samples = [
     '## Scope\n- [ ] 8. row\n',
