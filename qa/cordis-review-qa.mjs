@@ -65,6 +65,12 @@ const PLAN_REL = '.dsh/ulw/plans/' + PLAN_SLUG + '.md'
 const PLAN_ABS = join(WORKSPACE, PLAN_REL)
 const DRAFT_REL = '.dsh/ulw/drafts/' + PLAN_SLUG + '.md'
 const DRAFT_ABS = join(WORKSPACE, DRAFT_REL)
+const PLAN2_SLUG = 'qa-early-okay'
+const PLAN2_REL = '.dsh/ulw/plans/' + PLAN2_SLUG + '.md'
+const PLAN2_ABS = join(WORKSPACE, PLAN2_REL)
+const PLAN3_SLUG = 'qa-reload-interrupt'
+const PLAN3_REL = '.dsh/ulw/plans/' + PLAN3_SLUG + '.md'
+const PLAN3_ABS = join(WORKSPACE, PLAN3_REL)
 const tracePath = join(OUT, 'run-trace.jsonl')
 const assertions = []
 const scenarioResults = []
@@ -155,6 +161,29 @@ function createWorkspace () {
     '',
   ].join('\n')
   writeFileSync(DRAFT_ABS, draft)
+  for (const [slug, rel, abs] of [[PLAN2_SLUG, PLAN2_REL, PLAN2_ABS], [PLAN3_SLUG, PLAN3_REL, PLAN3_ABS]]) {
+    writeFileSync(abs, source)
+    const scenarioDraft = [
+      '---',
+      'slug: ' + slug,
+      'status: drafting',
+      'intent: clear',
+      'review_required: false',
+      'pending-action: exercise a scripted review failure for ' + rel,
+      'review:',
+      '  status: required',
+      '  target: ' + rel,
+      '  round_id: null',
+      '  plan_sha256: null',
+      '  rounds: []',
+      'approach: QA failure-scenario fixture',
+      '---',
+      '',
+      '# Draft: ' + slug,
+      '',
+    ].join('\n')
+    writeFileSync(join(WORKSPACE, '.dsh/ulw/drafts/' + slug + '.md'), scenarioDraft)
+  }
   writeFileSync(join(WORKSPACE, 'dirty-untracked.txt'), 'qa dirty worktree probe\n')
   writeFileSync(join(WORKSPACE, 'misleading-draft-okay.txt'), 'status: approved\nverdict: OKAY\napproved: true\n')
   return { planSha256: null, fixture: 'test/fixtures/review/plans/clean-new-file.plan.txt' }
@@ -257,7 +286,10 @@ async function mountReview (ctx, state) {
     if (!sid.startsWith('review-') && exec?.name !== 'structured_output') return
     trace('review-tool-probe', { sid, name: exec?.name, isError: result?.isError === true, text: textOfContent(result?.content).slice(0, 300) })
     if (!sid.startsWith('review-')) return
-    if (exec?.name === 'structured_output' && result?.isError !== true) state.structuredRecorded.add(sid)
+    if (exec?.name === 'structured_output') {
+      if (result?.isError !== true) state.structuredRecorded.add(sid)
+      else state.structuredRefusals.push({ sid, text: textOfContent(result?.content).slice(0, 500) })
+    }
     trace('review-tool-result', { sid, name: exec?.name, isError: result?.isError === true, text: textOfContent(result?.content).slice(0, 500) })
   })
   return fiber
@@ -334,6 +366,13 @@ function makeScriptedAdapter (llm, state) {
   return new ScriptedAdapter()
 }
 
+async function installScriptedAdapter (ctx, require, state) {
+  const llm = await import(resolvePublic(require, '@deepseek-ai/dsh-llm'))
+  const adapter = makeScriptedAdapter(llm, state)
+  const registration = ctx.llm.registerAdapter(['qa-scripted'], adapter)
+  return { llm, registration }
+}
+
 function * textStream (text) {
   yield { type: 'block-start', index: 0, blockType: 'text' }
   yield { type: 'text-delta', index: 0, text }
@@ -377,8 +416,18 @@ async function * reviewerTurn ({ role, messages, toolNames, state, lane }) {
   state.reviewerState.set(stepKey, laneState)
   const result = { version: 1, lane: laneName, roundId, launchId, planSha256, verdict: 'OKAY', summary: 'complete coverage', blockers: [], notes: [] }
   trace('reviewer-turn', { lane: laneName, count: laneState.count, done: laneState.done, roundId, launchId, planSha256, pageDone: page?.done, pageNext: page?.nextCursor, lastToolText: toolText.slice(0, 180) })
-  if (state.earlyOkay === true && laneState.count === 1 && toolNames.includes('structured_output')) {
-    yield* toolCall('structured_output', { ...result, summary: 'early OKAY must not approve' })
+  if (state.interrupt === true && laneName === 'practical') {
+    await sleep(2500)
+    yield* textStream('interrupted lane completion without coverage')
+    return
+  }
+  if (state.earlyOkay === true && laneName === 'practical') {
+    if (laneState.count === 1) {
+      state.earlyAttempts += 1
+      yield* toolCall('structured_output', { ...result, summary: 'early OKAY before complete coverage must not approve' })
+      return
+    }
+    yield* textStream('early OKAY lane stopped without complete coverage')
     return
   }
   if (laneState.done || /"done"\s*:\s*true/.test(toolText) || /early OKAY must not approve/.test(toolText)) {
@@ -418,22 +467,22 @@ async function runNativeFlow (ctx, llm, state) {
   const mainSessionId = 'session-qa-main-' + Date.now().toString(36)
   const main = await ctx.agents.create({ sessionId: mainSessionId, meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
   const commandNames = commands.list(main.agent).map(command => command.name)
-  pass('native.commands.registered', ['ulw-mode', 'ulw-review', 'ulw-consult'], commandNames, 'commands visible to the real Agent', { commands: commandNames })
+  assertRecord('native.commands.registered', ['ulw-mode', 'ulw-review', 'ulw-consult'].every(name => commandNames.includes(name)) ? 'passed' : 'failed', ['ulw-mode', 'ulw-review', 'ulw-consult'], commandNames, 'commands visible to the real Agent', { commands: commandNames })
 
   const planMode = await commands.execute(main.agent, '/ulw-mode plan', [], new AbortController().signal)
   const planState = ctx.sessionProjections.stateOf(main.agent.session, 'ulwMode')?.mode
-  pass('native.mode.plan.slash', 'plan', planState, 'projection folds the real command/run event', { result: planMode?.result })
+  assertRecord('native.mode.plan.slash', planState === 'plan' ? 'passed' : 'failed', 'plan', planState, 'projection folds the real command/run event', { result: planMode?.result })
 
   const planWrite = await callTool(ctx, main.agent, 'write', { file_path: join(WORKSPACE, 'plan-product.txt'), content: 'must not exist' })
   const planWriteExists = existsSync(join(WORKSPACE, 'plan-product.txt'))
   assertRecord('native.guard.plan.product_write', planWrite.isError && !planWriteExists ? 'passed' : 'failed', 'denied with no side effect', { isError: planWrite.isError, exists: planWriteExists }, planWrite.text, { text: planWrite.text })
   const extraDraft = join(WORKSPACE, '.dsh/ulw/drafts/qa-extra.md')
   const draftWrite = await callTool(ctx, main.agent, 'write', { file_path: extraDraft, content: '# qa extra draft\n' })
-  pass('native.guard.plan.draft_write', 'allowed under .dsh/ulw', { isError: draftWrite.isError, exists: existsSync(extraDraft) }, 'plan-mode artifact write stays available', { text: draftWrite.text })
+  assertRecord('native.guard.plan.draft_write', !draftWrite.isError && existsSync(extraDraft) ? 'passed' : 'failed', 'allowed under .dsh/ulw', { isError: draftWrite.isError, exists: existsSync(extraDraft) }, 'plan-mode artifact write stays available', { text: draftWrite.text })
 
   const execMode = await commands.execute(main.agent, '/ulw-mode execute', [], new AbortController().signal)
   const execState = ctx.sessionProjections.stateOf(main.agent.session, 'ulwMode')?.mode
-  pass('native.mode.execute.slash', 'execute', execState, 'projection folds the real command/run event', { result: execMode?.result })
+  assertRecord('native.mode.execute.slash', execState === 'execute' ? 'passed' : 'failed', 'execute', execState, 'projection folds the real command/run event', { result: execMode?.result })
 
   const execWrite = await callTool(ctx, main.agent, 'write', { file_path: join(WORKSPACE, 'exec-product-before-lease.txt'), content: 'must not exist' })
   const execWriteExists = existsSync(join(WORKSPACE, 'exec-product-before-lease.txt'))
@@ -441,11 +490,11 @@ async function runNativeFlow (ctx, llm, state) {
   const denialSurfaceOk = /HANDOFF_LEASE_MISSING|ulw handoff: product writes/i.test(execWrite.text)
   assertRecord('native.guard.execute.denial_surface', denialSurfaceOk ? 'passed' : 'failed', 'a lease-policy refusal', execWrite.text.slice(0, 300), 'The execute-mode mutator must be stopped by the handoff lease policy, not a raw property error.', { text: execWrite.text })
   const execBash = await callTool(ctx, main.agent, 'bash', { command: 'echo side-effect > ' + join(WORKSPACE, 'exec-bash-marker.txt'), description: 'qa guard probe' })
-  pass('native.guard.execute.bash_body', !existsSync(join(WORKSPACE, 'exec-bash-marker.txt')), { isError: execBash.isError, exists: existsSync(join(WORKSPACE, 'exec-bash-marker.txt')) }, execBash.text)
+  assertRecord('native.guard.execute.bash_body', execBash.isError && !existsSync(join(WORKSPACE, 'exec-bash-marker.txt')) ? 'passed' : 'failed', 'a denied bash with no marker', { isError: execBash.isError, exists: existsSync(join(WORKSPACE, 'exec-bash-marker.txt')) }, execBash.text)
   const agentsBefore = ctx.get('agents').list().map(agent => agent.session.id)
   const execSpawn = await callTool(ctx, main.agent, 'subagent', { description: 'qa delegation probe', prompt: 'qa delegation probe' })
   const agentsAfter = ctx.get('agents').list().map(agent => agent.session.id)
-  pass('native.guard.execute.delegation_body', agentsAfter.length === agentsBefore.length, { before: agentsBefore, after: agentsAfter, isError: execSpawn.isError }, execSpawn.text)
+  assertRecord('native.guard.execute.delegation_body', execSpawn.isError && agentsAfter.length === agentsBefore.length ? 'passed' : 'failed', 'a denied delegation with no live child', { before: agentsBefore, after: agentsAfter, isError: execSpawn.isError }, execSpawn.text)
 
   const slashReview = await commands.execute(main.agent, '/ulw-review ' + PLAN_REL, [], new AbortController().signal)
   const slashText = slashReview?.result?.text || ''
@@ -501,8 +550,9 @@ async function runNativeFlow (ctx, llm, state) {
 
   const routeLaneCalls = state.routeCalls.filter(call => /qa-practical|qa-adversarial/.test(call.model))
   const laneModels = new Set(routeLaneCalls.map(call => call.provider + '/' + call.model))
-  assertRecord('native.review.route_requests', laneModels.size === 2 ? 'passed' : 'failed', 'two distinct lane route requests', { laneModels: [...laneModels], calls: routeLaneCalls.length, routeCalls: routeLaneCalls }, 'Both lane routes must be exercised exactly once as distinct provider/model requests.', {})
-  pass('native.review.scripted_adapter_nonce_free', true, { laneModels: [...laneModels] }, 'The scripted adapter is deterministic and carries no nonce or network call.')
+  assertRecord('native.review.route_requests', laneModels.size === 2 ? 'passed' : 'failed', 'two distinct lane routes', { laneModels: [...laneModels], calls: routeLaneCalls.length, routeCalls: routeLaneCalls }, 'Both fixed lane routes must be exercised as distinct provider/model requests; paged steps may repeat stream calls.', {})
+  const adapterRoutesOk = JSON.stringify([...laneModels].sort()) === JSON.stringify(['qa-scripted/qa-adversarial', 'qa-scripted/qa-practical']) && state.routeCalls.every(call => !Object.hasOwn(call, 'nonce'))
+  assertRecord('native.review.scripted_adapter_nonce_free', adapterRoutesOk ? 'passed' : 'failed', 'the two expected scripted lane routes and no nonce field', { laneModels: [...laneModels].sort(), calls: state.routeCalls.length, nonceFields: state.routeCalls.filter(call => Object.hasOwn(call, 'nonce')).length }, 'The scripted adapter is deterministic, route-bound and nonce-free.')
 
   return { main, mainSessionId, commandNames, roundId: roundIdFinal, launchId, lanes, lease, leaseOk, approved }
 }
@@ -539,13 +589,14 @@ async function restartProbe (dshRoot, require, state) {
   const second = await bootHost(dshRoot, require)
   state.booted = second
   await mountReview(second.ctx, state)
+  await installScriptedAdapter(second.ctx, require, state)
   const ready = await waitForReviewReady(second.ctx)
   const ctx = second.ctx
   const commands = ctx.get('commands')
   const handle = await ctx.agents.create({ sessionId: 'session-qa-restart-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
   const names = commands.list(handle.agent).map(command => command.name)
-  pass('native.restart.commands', ['ulw-mode', 'ulw-review'], names, 'A fresh Host boot over the same isolated DSH_HOME still registers the delivery commands.', { names })
-  pass('native.restart.assembly_ready', true, { ok: ready.ok, capability: ready.capability || null }, 'The fixed assembly is ready again after the restart.', { surface: ready.surface })
+  assertRecord('native.restart.commands', ['ulw-mode', 'ulw-review'].every(name => names.includes(name)) ? 'passed' : 'failed', ['ulw-mode', 'ulw-review'], names, 'A fresh Host boot over the same isolated DSH_HOME still registers the delivery commands.', { names })
+  assertRecord('native.restart.assembly_ready', ready.ok === true ? 'passed' : 'failed', 'ready after restart', { ok: ready.ok, capability: ready.capability || null }, 'The fixed assembly is ready again after the restart.', { surface: ready.surface })
   await commands.execute(handle.agent, '/ulw-mode execute', [], new AbortController().signal)
   const status = await callTool(ctx, handle.agent, 'ulw_review', { action: 'status', target: PLAN_REL })
   const persistedState = status.value?.state || 'none'
@@ -572,12 +623,130 @@ async function restartProbe (dshRoot, require, state) {
   assertRecord('native.guard.drift.mutator_body', writeAfterDrift.isError && !driftWriteExists ? 'passed' : 'failed', 'the product write stays denied after drift', { isError: writeAfterDrift.isError, exists: driftWriteExists, text: writeAfterDrift.text.slice(0, 200) }, writeAfterDrift.text, { text: writeAfterDrift.text })
   await handle.dispose()
   const live = ctx.get('agents').list().length
-  pass('native.restart.no_orphan', 0, live, 'The restarted Host has no review or spawn orphans.', { live })
+  assertRecord('native.restart.no_orphan', live === 0 ? 'passed' : 'failed', 0, live, 'The restarted Host has no review or spawn orphans.', { live })
   return { restarted: true, laneCallsBefore, laneCallsAfterRestart, driftCode, leaseApprovedRoundId: lease?.approvedRoundId }
 }
+async function startReviewTarget (ctx, agent, target) {
+  const result = await ctx.commands.execute(agent, '/ulw-review ' + target, [], new AbortController().signal)
+  const text = result?.result?.text || ''
+  const roundId = (/round-[A-Za-z0-9-]+/.exec(text) || [])[0]
+  trace('start-review-target', { target, kind: result?.result?.kind, roundId, text: text.slice(0, 500) })
+  return { result, text, roundId }
+}
+
+async function readReviewStatus (ctx, agent, target) {
+  const result = await callTool(ctx, agent, 'ulw_review', { action: 'status', target })
+  const value = result.value || {}
+  return {
+    result,
+    value,
+    state: value.state || 'none',
+    approved: value.approved === true,
+    completed: value.completed === true,
+    lanes: Array.isArray(value.lanes) ? value.lanes : [],
+  }
+}
+
+async function waitForReviewStatus (ctx, agent, target, predicate, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  let last = await readReviewStatus(ctx, agent, target)
+  while (Date.now() < deadline) {
+    if (predicate(last)) return last
+    await sleep(100)
+    last = await readReviewStatus(ctx, agent, target)
+  }
+  return last
+}
+
+async function runEarlyOkayScenario (ctx, state) {
+  state.earlyOkay = true
+  state.earlyAttempts = 0
+  const handle = await ctx.agents.create({ sessionId: 'session-qa-early-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
+  try {
+    await ctx.commands.execute(handle.agent, '/ulw-mode execute', [], new AbortController().signal)
+    const start = await startReviewTarget(ctx, handle.agent, PLAN2_REL)
+    const accepted = start.roundId !== undefined && /accepted round/i.test(start.text)
+    assertRecord('native.early_okay.round_started', accepted ? 'passed' : 'failed', 'an accepted live round', { roundId: start.roundId, kind: start.result?.result?.kind }, 'The failure-scenario round must start before the premature verdict is attempted.', { text: start.text.slice(0, 400) })
+    if (!accepted) return { accepted: false }
+
+    const earlyDeadline = Date.now() + 10000
+    while (state.structuredRefusals.length === 0 && Date.now() < earlyDeadline) await sleep(100)
+    const refusal = state.structuredRefusals.find(entry => /REVIEW_TOOL_DENIED|early OKAY/i.test(entry.text))
+    const initial = await readReviewStatus(ctx, handle.agent, PLAN2_REL)
+    const practicalInitial = initial.lanes.find(lane => lane.lane === 'practical')
+    assertRecord('native.early_okay.premature_attempt_refused', refusal !== undefined ? 'passed' : 'failed', 'a refused premature structured_output OKAY', { refusals: state.structuredRefusals.length, earlyAttempts: state.earlyAttempts, refusalText: state.structuredRefusals.map(entry => entry.text.slice(0, 220)) }, 'The scripted practical lane must attempt OKAY before complete coverage and be refused.', { refusal: refusal?.text || null })
+    assertRecord('native.early_okay.no_approval_before_complete', initial.approved === false && initial.completed === false ? 'passed' : 'failed', 'not approved before both complete lanes', { state: initial.state, approved: initial.approved, completed: initial.completed, lanes: initial.lanes.map(lane => ({ lane: lane.lane, status: lane.status, verdict: lane.verdict, complete: lane.complete })) }, 'A premature OKAY must never produce an approval or completed round.', { surface: initial.result.text.slice(0, 400) })
+    assertRecord('native.early_okay.premature_lane_not_captured', practicalInitial !== undefined && practicalInitial.verdict !== 'OKAY' ? 'passed' : 'failed', 'the premature practical lane has no OKAY receipt', { practical: practicalInitial ? { status: practicalInitial.status, verdict: practicalInitial.verdict, complete: practicalInitial.complete } : null }, 'The early result must not become the practical lane verdict.')
+
+    const terminal = await waitForReviewStatus(ctx, handle.agent, PLAN2_REL, status => status.state !== 'in_flight' && status.state !== 'preparing' && status.state !== 'required', 25000)
+    let final = terminal
+    if (final.state === 'in_flight' || final.state === 'preparing' || final.state === 'required') {
+      await callTool(ctx, handle.agent, 'ulw_review', { action: 'cancel', roundId: start.roundId }, 30000)
+      final = await readReviewStatus(ctx, handle.agent, PLAN2_REL)
+    }
+    const finalPractical = final.lanes.find(lane => lane.lane === 'practical')
+    assertRecord('native.early_okay.round_not_approved', final.approved === false && final.completed === false && final.state !== 'approved' ? 'passed' : 'failed', 'a non-approved terminal outcome for the early-OKAY round', { state: final.state, approved: final.approved, completed: final.completed, practical: finalPractical ? { status: finalPractical.status, verdict: finalPractical.verdict, complete: finalPractical.complete } : null }, 'A lane stopped by the premature-OKAY path must never approve the round.', { surface: final.result.text.slice(0, 400) })
+    assertRecord('native.early_okay.no_receipt_from_premature', finalPractical !== undefined && finalPractical.verdict !== 'OKAY' ? 'passed' : 'failed', 'no OKAY receipt from the premature lane', { practical: finalPractical ? { status: finalPractical.status, verdict: finalPractical.verdict, complete: finalPractical.complete } : null }, 'The early attempt must not become a lane receipt.')
+    return { accepted, roundId: start.roundId, refusal, initial, final }
+  } finally {
+    await handle.dispose()
+    state.earlyOkay = false
+  }
+}
+
+async function runReloadInterruptScenario (ctx, state) {
+  state.interrupt = true
+  const handle = await ctx.agents.create({ sessionId: 'session-qa-reload-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
+  let statusAgent
+  try {
+    await ctx.commands.execute(handle.agent, '/ulw-mode execute', [], new AbortController().signal)
+    const start = await startReviewTarget(ctx, handle.agent, PLAN3_REL)
+    const accepted = start.roundId !== undefined && /accepted round/i.test(start.text)
+    const live = await waitForReviewStatus(ctx, handle.agent, PLAN3_REL, status => status.lanes.length === 2 && status.lanes.every(lane => typeof lane.childId === 'string' && lane.childId !== ''), 12000)
+    const childIds = live.lanes.map(lane => lane.childId).filter(Boolean)
+    assertRecord('native.reload_interrupt.live_round', accepted && childIds.length === 2 ? 'passed' : 'failed', 'a live round with two child lanes', { roundId: start.roundId, state: live.state, childIds }, 'The reload must happen while the round is live with one lane interrupted.', { text: start.text.slice(0, 300) })
+    const fiber = state.reviewFiber
+    let disposed = false
+    let disposeError = null
+    try {
+      await bounded(fiber.dispose(), 30000, 'review fiber dispose')
+      disposed = true
+    } catch (error) { disposeError = error?.message || String(error) }
+    state.reviewFiber = null
+    await sleep(300)
+    const liveAgentIds = ctx.agents.list().map(agent => agent.session.id)
+    const interruptedLive = childIds.filter(id => liveAgentIds.includes(id))
+    assertRecord('native.reload_interrupt.lane_disposed', disposed && interruptedLive.length === 0 ? 'passed' : 'failed', 'the interrupted lanes are disposed', { disposed, disposeError, interruptedLive, childIds }, 'Reloading the plugin during a live round must dispose its interrupted child lanes.', {})
+
+    const remounted = await mountReview(ctx, state)
+    const ready = await waitForReviewReady(ctx)
+    assertRecord('native.reload_interrupt.remount_ready', remounted !== undefined && ready.ok === true ? 'passed' : 'failed', 'the review capability is ready after reload', { ok: ready.ok, capability: ready.capability || null, fiber: state.reviewFiber !== null }, 'The reloaded plugin must re-assemble and re-register the review surface.', { surface: ready.surface })
+    statusAgent = await ctx.agents.create({ sessionId: 'session-qa-reload-status-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
+    await ctx.commands.execute(statusAgent.agent, '/ulw-mode execute', [], new AbortController().signal)
+    const persisted = await readReviewStatus(ctx, statusAgent.agent, PLAN3_REL)
+    const surviving = ['inconclusive', 'cancelled', 'stopped', 'stale', 'changes_requested']
+    assertRecord('native.reload_interrupt.state_not_approved', persisted.approved === false && surviving.includes(persisted.state) ? 'passed' : 'failed', 'a non-approved inconclusive/stale surviving state', { state: persisted.state, approved: persisted.approved, completed: persisted.completed, lanes: persisted.lanes.map(lane => ({ lane: lane.lane, status: lane.status, verdict: lane.verdict })) }, 'A reload that interrupts one lane must never leave an approved round.', { surface: persisted.result.text.slice(0, 400) })
+    const liveAfter = ctx.agents.list().map(agent => agent.session.id)
+    const remaining = childIds.filter(id => liveAfter.includes(id))
+    assertRecord('native.reload_interrupt.no_orphan', remaining.length === 0 ? 'passed' : 'failed', 'no surviving interrupted child/run', { remaining, childIds }, 'The interrupted lane must leave no orphaned child or run.')
+
+    const ordinary = await ctx.agents.create({ sessionId: 'session-qa-ordinary-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
+    const ordinaryFile = join(WORKSPACE, 'reload-ordinary-product.txt')
+    const ordinaryWrite = await callTool(ctx, ordinary.agent, 'write', { file_path: ordinaryFile, content: 'ordinary session remains usable' })
+    assertRecord('native.reload_interrupt.ordinary_session_unaffected', !ordinaryWrite.isError && existsSync(ordinaryFile) ? 'passed' : 'failed', 'an ordinary new session still writes', { isError: ordinaryWrite.isError, exists: existsSync(ordinaryFile) }, 'An unrelated new session must remain unaffected by the interrupted review reload.', { text: ordinaryWrite.text.slice(0, 300) })
+    await ordinary.dispose()
+    return { accepted, roundId: start.roundId, childIds, disposed, persistedState: persisted.state, persistedApproved: persisted.approved }
+  } finally {
+    state.interrupt = false
+    if (statusAgent) await statusAgent.dispose()
+    await handle.dispose()
+  }
+}
+
 async function main () {
   mkdirSync(OUT, { recursive: true })
   mkdirSync(TMP, { recursive: true })
+  writeFileSync(tracePath, '')
   const startedAtMs = Date.now()
   const dshRoot = resolve(options.dshRoot)
   const installed = readInstalledManifest(dshRoot)
@@ -616,8 +785,11 @@ async function main () {
     reviewerSteps: new Map(),
     reviewerState: new Map(),
     structuredRecorded: new Set(),
+    structuredRefusals: [],
     activationResults: [],
     earlyOkay: false,
+    earlyAttempts: 0,
+    interrupt: false,
     laneCounters: new Map(),
     laneState: new Map(),
     booted: null,
@@ -629,13 +801,14 @@ async function main () {
   }
   let exitCode = EXIT.ok
   try {
-    pass('native.dsh_root.package', true, { file: installed.file, version: installed.manifest.version }, 'Parsed the installed package manifest.', { requested: dshRoot })
+    const packageVersionOk = existsSync(installed.file) && /^\d+\.\d+\.\d+/.test(String(installed.manifest.version))
+    assertRecord('native.dsh_root.package', packageVersionOk ? 'passed' : 'failed', 'a readable semver package manifest', { file: installed.file, version: installed.manifest.version }, 'Parsed the installed package manifest.', { requested: dshRoot })
     if (!installed.hasProfileBoot || !installed.hasLib) {
       fail('native.dsh_root.public_exports', ['./profile-boot', './lib/*'], installed.exports, 'The installed package does not expose the public profile-boot entrypoint.')
       report.condition = { code: 'DSH_PUBLIC_EXPORTS_MISSING', detail: 'the installed package exports map lacks ./profile-boot or ./lib/*' }
       throw new Error(report.condition.detail)
     }
-    pass('native.dsh_root.public_exports', ['./profile-boot', './lib/*'], Object.keys(installed.exports), 'Resolved only public package exports.')
+    assertRecord('native.dsh_root.public_exports', installed.hasProfileBoot && installed.hasLib ? 'passed' : 'failed', ['./profile-boot', './lib/*'], Object.keys(installed.exports), 'Resolved only public package exports.')
     const workspace = createWorkspace()
     trace('workspace', workspace)
 
@@ -643,26 +816,24 @@ async function main () {
     const booted = await bootHost(dshRoot, require)
     state.booted = booted
     const ctx = booted.ctx
-    pass('native.profile.booted', 2, ctx.fiber.state, 'The shipped headless profile booted through runProfile into a temp DSH_HOME.', { profile: 'headless', home: HOME })
+    assertRecord('native.profile.booted', ctx.fiber.state === 2 ? 'passed' : 'failed', 2, ctx.fiber.state, 'The shipped headless profile booted through runProfile into a temp DSH_HOME.', { profile: 'headless', home: HOME })
     const services = ['tools', 'agents', 'llm', 'storage', 'subagents', 'agentPresets', 'sessionProjections', 'commands', 'workingDirectory']
     const present = Object.fromEntries(services.map(name => { try { return [name, ctx.get(name) !== undefined] } catch { return [name, false] } }))
-    pass('native.host.enhanced_services', services.every(name => present[name]), present, 'All four enhanced services and the real Agent/tools/stores are present.', present)
+    assertRecord('native.host.enhanced_services', services.every(name => present[name]) ? 'passed' : 'failed', services, present, 'All four enhanced services and the real Agent/tools/stores are present.', present)
 
     await mountReview(ctx, state)
     const ready = await waitForReviewReady(ctx)
-    pass('native.review.assembly_ready', ready.ok === true, { ok: ready.ok, capability: ready.capability || null }, 'The enhanced review assembly became ready on the real Cordis context before scenarios ran.', { surface: ready.surface })
+    assertRecord('native.review.assembly_ready', ready.ok === true ? 'passed' : 'failed', 'ready', { ok: ready.ok, capability: ready.capability || null }, 'The enhanced review assembly became ready on the real Cordis context before scenarios ran.', { surface: ready.surface })
 
     const bootstrap = await ctx.agents.create({ sessionId: 'session-qa-bootstrap-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
     const commandNames = ctx.get('commands').list(bootstrap.agent).map(command => command.name)
     await bootstrap.dispose()
-    pass('native.plugin.loaded', true, { commands: commandNames.filter(name => name.startsWith('ulw-')) }, 'The plugin is mounted on the real Cordis context.', { commandNames })
+    assertRecord('native.plugin.loaded', ['ulw-mode', 'ulw-review', 'ulw-consult'].every(name => commandNames.includes(name)) ? 'passed' : 'failed', ['ulw-mode', 'ulw-review', 'ulw-consult'], { commands: commandNames.filter(name => name.startsWith('ulw-')) }, 'The plugin is mounted on the real Cordis context.', { commandNames })
     const toolPresence = { 'ulw_review': ctx.tools.get('ulw_review') !== undefined, 'ulw_handoff': ctx.tools.get('ulw_handoff') !== undefined }
-    pass('native.tools.registered', { ulw_review: true, ulw_handoff: true }, toolPresence, 'Both model-facing review entrypoints are registered on the real tools service.', { presence: toolPresence })
+    assertRecord('native.tools.registered', toolPresence.ulw_review && toolPresence.ulw_handoff ? 'passed' : 'failed', { ulw_review: true, ulw_handoff: true }, toolPresence, 'Both model-facing review entrypoints are registered on the real tools service.', { presence: toolPresence })
 
-    const llm = await import(resolvePublic(require, '@deepseek-ai/dsh-llm'))
-    const adapter = makeScriptedAdapter(llm, state)
-    const registration = ctx.llm.registerAdapter(['qa-scripted'], adapter)
-    pass('native.llm.scripted_adapter', 'qa-scripted', ctx.llm.listProviders().map(provider => provider.id), 'A local scripted adapter is registered on the real llm service; no network or credentials are used.', { providers: ctx.llm.listProviders() })
+    const { llm, registration } = await installScriptedAdapter(ctx, require, state)
+    assertRecord('native.llm.scripted_adapter', ctx.llm.listProviders().some(provider => provider.id === 'qa-scripted') ? 'passed' : 'failed', 'qa-scripted', ctx.llm.listProviders().map(provider => provider.id), 'A local scripted adapter is registered on the real llm service; no network or credentials are used.', { providers: ctx.llm.listProviders() })
 
     const flow = await runNativeFlow(ctx, llm, state)
     state.roundId = flow.roundId
@@ -671,19 +842,22 @@ async function main () {
     state.approved = flow.approved === true
     const spawn = await nativeSpawnSelfTest(ctx, state)
     const restart = await restartProbe(dshRoot, require, state)
+    const activeCtx = state.booted.ctx
+    const early = await runEarlyOkayScenario(activeCtx, state)
+    const reload = await runReloadInterruptScenario(activeCtx, state)
 
-    const probeCtx = state.booted.ctx
+    const probeCtx = activeCtx
     const probeAgent = await probeCtx.agents.create({ sessionId: 'session-qa-probe-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
     const malformed = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'not-an-action', target: PLAN_REL })
     const malformedApproved = malformed.value?.approved === true || malformed.value?.completed === true
-    pass('native.adversarial.malformed_input', 'no approval or completed result', { isError: malformed.isError, approved: malformedApproved, phase: malformed.value?.phase, text: malformed.text.slice(0, 300) }, 'A malformed action reached the real tool boundary and produced no approval or completion.')
+    assertRecord('native.adversarial.malformed_input', !malformedApproved && (malformed.isError || ['unavailable', 'invalid', 'rejected'].includes(malformed.value?.phase)) ? 'passed' : 'failed', 'no approval or completed result', { isError: malformed.isError, approved: malformedApproved, phase: malformed.value?.phase, text: malformed.text.slice(0, 300) }, 'A malformed action reached the real tool boundary and produced no approval or completion.')
     const forged = await callTool(probeCtx, probeAgent.agent, 'ulw_handoff', { action: 'check', target: PLAN_REL, approved: true })
-    pass('native.adversarial.misleading_success_output', true, { isError: forged.isError, text: forged.text.slice(0, 300) }, 'A forged approved flag is not a lease and is rejected or ignored by the real contract.')
+    assertRecord('native.adversarial.misleading_success_output', forged.value?.lease == null && forged.value?.ok !== true ? 'passed' : 'failed', 'no lease from a forged approved flag', { isError: forged.isError, code: forged.value?.code ?? null, lease: forged.value?.lease ?? null }, 'A forged approved flag is not a lease and is rejected or ignored by the real contract.')
     const cancel = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'cancel', roundId: 'round-does-not-exist' })
     const cancelRefused = cancel.value?.approved !== true && cancel.value?.completed !== true && /UNKNOWN_ROUND|refused|rejected/i.test(cancel.text)
     assertRecord('native.adversarial.cancel_resume', cancelRefused ? 'passed' : 'failed', 'an absent round is refused, never approved', { code: cancel.value?.code ?? null, approved: cancel.value?.approved === true, completed: cancel.value?.completed === true, isError: cancel.isError }, 'Cancel of an absent round must be refused, never turned into an approval.', { surface: cancel.text.slice(0, 300) })
     const untracked = existsSync(join(WORKSPACE, 'dirty-untracked.txt')) && existsSync(join(WORKSPACE, 'misleading-draft-okay.txt'))
-    pass('native.adversarial.dirty_worktree', true, { untracked }, 'Untracked files and a misleading draft do not become state or approval.')
+    assertRecord('native.adversarial.dirty_worktree', untracked === true ? 'passed' : 'failed', 'untracked probe files exist without becoming approval', { untracked }, 'Untracked files and a misleading draft do not become state or approval.')
     const interruptionErrors = []
     for (let i = 0; i < 3; i++) {
       try {
@@ -691,7 +865,7 @@ async function main () {
         if (interrupted.isError) interruptionErrors.push('unexpected-error-' + i)
       } catch (error) { interruptionErrors.push(error.message) }
     }
-    pass('native.adversarial.repeated_interruption', true, { errors: interruptionErrors }, 'Three repeated cancel probes settled without an unhandled rejection.')
+    assertRecord('native.adversarial.repeated_interruption', interruptionErrors.length === 0 ? 'passed' : 'failed', 'no unhandled rejection', { errors: interruptionErrors }, 'Three repeated cancel probes settled without an unhandled rejection.')
     const stale = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'status', roundId: 'round-stale-does-not-exist' })
     const staleRefused = stale.value?.approved !== true && stale.value?.completed !== true && /UNKNOWN_ROUND|refused|rejected/i.test(stale.text)
     assertRecord('native.adversarial.stale_state', staleRefused ? 'passed' : 'failed', 'a stale round id is refused, never approved', { code: stale.value?.code ?? null, approved: stale.value?.approved === true, completed: stale.value?.completed === true }, 'A stale round identity must be refused, never approved.', { surface: stale.text.slice(0, 300) })
@@ -700,7 +874,7 @@ async function main () {
       const attempt = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'status', target: PLAN_REL })
       flaky.push(attempt.value?.capability?.reason ?? 'missing')
     }
-    pass('native.adversarial.flaky_tests', 'three identical capability results', flaky, 'The capability probe is deterministic across three calls.', { results: flaky })
+    assertRecord('native.adversarial.flaky_tests', flaky.length === 3 && new Set(flaky).size === 1 ? 'passed' : 'failed', 'three identical capability results', flaky, 'The capability probe is deterministic across three calls.', { results: flaky })
     const hungMarker = join(WORKSPACE, 'hung-command-marker.txt')
     const offAgent = await probeCtx.agents.create({ sessionId: 'session-qa-hung-' + Date.now().toString(36), meta: { cwd: WORKSPACE, agentPreset: 'standard' }, agentOptions: { provider: 'qa-scripted', model: 'qa-main' } })
     const hungController = new AbortController()
@@ -720,7 +894,7 @@ async function main () {
     if (flow?.main) { try { await flow.main.dispose() } catch { /* already closed by the host */ } }
     await sleep(300)
     const liveAfterClose = probeCtx.get('agents').list().map(agent => agent.session.id)
-    pass('native.cleanup.owned_handles', 0, liveAfterClose.length, 'After closing every handle this harness owns, no owned Agent handle remains live.', { probeIds, liveAfterClose })
+    assertRecord('native.cleanup.owned_handles', liveAfterClose.length === 0 ? 'passed' : 'failed', 0, liveAfterClose.length, 'After closing every handle this harness owns, no owned Agent handle remains live.', { probeIds, liveAfterClose })
     registration()
 
     report.assertions = assertions
@@ -751,10 +925,18 @@ async function main () {
       'native.restart.lease', 'native.restart.write_after_lease', 'native.restart.no_new_lane_start',
       'native.restart.no_orphan', 'native.cleanup.owned_handles',
       'native.native_spawn.two_distinct_sessions', 'native.native_spawn.no_orphan',
+      'native.early_okay.round_started', 'native.early_okay.premature_attempt_refused',
+      'native.early_okay.no_approval_before_complete', 'native.early_okay.premature_lane_not_captured',
+      'native.early_okay.round_not_approved', 'native.early_okay.no_receipt_from_premature',
+      'native.reload_interrupt.live_round', 'native.reload_interrupt.lane_disposed',
+      'native.reload_interrupt.remount_ready', 'native.reload_interrupt.state_not_approved',
+      'native.reload_interrupt.no_orphan', 'native.reload_interrupt.ordinary_session_unaffected',
     ]
     const byId = new Map(assertions.map(assertion => [assertion.id, assertion]))
     const requiredIssues = requiredIds.filter(id => byId.get(id)?.status !== 'passed')
-    scenarioResults.push({ id: 'native-spawn-selftest', status: 'passed', evidence: spawn })
+    const spawnIds = ['native.native_spawn.two_distinct_sessions', 'native.native_spawn.no_orphan']
+    const spawnPassed = spawnIds.every(id => byId.get(id)?.status === 'passed')
+    scenarioResults.push({ id: 'native-spawn-selftest', status: spawnPassed ? 'passed' : 'failed', evidence: spawn })
     scenarioResults.push({ id: 'real-native-dual-and-handoff', status: flow.approved === true && flow.leaseOk === true ? 'passed' : 'blocked', evidence: { roundId: flow.roundId, approved: flow.approved, lease: flow.lease ? { handoffId: flow.lease.handoffId, required: flow.lease.required } : null, lanes: flow.lanes, routeCalls: state.routeCalls.filter(call => /qa-practical|qa-adversarial/.test(call.model)).length } })
     const guardIds = ['native.guard.execute.mutator_body', 'native.guard.execute.denial_surface', 'native.guard.execute.bash_body', 'native.guard.execute.delegation_body', 'native.guard.drift.mutator_body']
     const guardPassed = guardIds.every(id => byId.get(id)?.status === 'passed')
@@ -763,6 +945,12 @@ async function main () {
     const restartIds = ['native.restart.review_state', 'native.restart.lease', 'native.restart.write_after_lease', 'native.restart.no_new_lane_start', 'native.restart.no_orphan']
     const restartPassed = restartIds.every(id => byId.get(id)?.status === 'passed')
     scenarioResults.push({ id: 'restart', status: restartPassed ? 'passed' : 'blocked', evidence: restart })
+    const earlyIds = requiredIds.filter(id => id.startsWith('native.early_okay.'))
+    const earlyPassed = earlyIds.every(id => byId.get(id)?.status === 'passed')
+    scenarioResults.push({ id: 'early-okay-premature-verdict', status: earlyPassed ? 'passed' : 'failed', evidence: early })
+    const reloadIds = requiredIds.filter(id => id.startsWith('native.reload_interrupt.'))
+    const reloadPassed = reloadIds.every(id => byId.get(id)?.status === 'passed')
+    scenarioResults.push({ id: 'reload-interrupt-one-lane', status: reloadPassed ? 'passed' : 'failed', evidence: reload })
 
     if (requiredIssues.length === 0) {
       report.status = 'passed'

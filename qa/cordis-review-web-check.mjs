@@ -66,6 +66,7 @@ function record (id, status, expected, actual, detail, extra = {}) {
   return assertion
 }
 const pass = (id, expected, actual, detail, extra) => record(id, 'passed', expected, actual, detail, extra)
+const assertRecord = (id, status, expected, actual, detail, extra) => record(id, status, expected, actual, detail, extra)
 const fail = (id, expected, actual, detail, extra) => record(id, 'failed', expected, actual, detail, extra)
 const blocked = (id, expected, actual, detail, extra) => record(id, 'blocked', expected, actual, detail, extra)
 
@@ -123,12 +124,14 @@ function liveProfileFacts () {
     reviewModulePresent: reviewModule ? existsSync(reviewModule) : false,
     underTestRoot,
     underTestPackage,
+    expectedRoot: dependency?.startsWith('link:') ? safeRealpath(dependency.slice(5)) : undefined,
     sameRoot: resolvedRoot !== undefined && underTestRoot !== undefined && resolvedRoot === underTestRoot,
   }
 }
 
 async function main () {
   mkdirSync(OUT, { recursive: true })
+  writeFileSync(tracePath, '')
   const report = {
     schema: SCHEMA,
     task: 18,
@@ -180,12 +183,14 @@ async function main () {
       sameRoot: facts.sameRoot,
     })
     if (facts.resolvedRoot) {
-      pass('web.runtime.package_root', facts.resolvedRoot, facts.resolvedRoot, 'The live Web profile install graph resolves dsh-ulw-plan to this package root.', { dependency: facts.dependency, symlink: facts.linkedEntrySymlink })
+      const rootMatchesDependency = facts.expectedRoot !== undefined && facts.resolvedRoot === facts.expectedRoot
+      assertRecord('web.runtime.package_root', rootMatchesDependency ? 'passed' : 'failed', 'the dependency target resolved from the live Web profile link', { expectedRoot: facts.expectedRoot ?? null, resolvedRoot: facts.resolvedRoot }, 'The live Web profile install-graph root resolves from its declared dsh-ulw-plan dependency; it is not the package under test.', { dependency: facts.dependency, symlink: facts.linkedEntrySymlink })
     } else {
       blocked('web.runtime.package_root', 'a resolved dsh-ulw-plan package root', null, 'The live Web profile has no resolvable dsh-ulw-plan dependency.')
     }
     if (facts.loadedPackage) {
-      pass('web.runtime.package_version', 'a readable installed version', facts.loadedPackage.version, 'The resolved package declares this version.', { name: facts.loadedPackage.name })
+      const versionMatchesSource = typeof facts.loadedPackage.version === 'string' && facts.loadedPackage.version === facts.underTestPackage?.version
+      assertRecord('web.runtime.package_version', versionMatchesSource ? 'passed' : 'failed', 'the version declared by the package under test', { loaded: facts.loadedPackage.version, source: facts.underTestPackage?.version }, 'The live root has a readable version matching the package under test\'s manifest; it does not prove the review modules are present.', { name: facts.loadedPackage.name })
     } else {
       blocked('web.runtime.package_version', 'a readable installed version', null, 'The resolved package has no readable manifest.')
     }
