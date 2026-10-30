@@ -16,7 +16,7 @@ import { test } from 'node:test'
 import { ULW_REVIEW_COMMAND } from '../lib/commands.js'
 import { HANDOFF_ACTIONS } from '../lib/review-handoff.js'
 import { parseHandoffRequest, parseReviewRequest } from '../lib/review-protocol.js'
-import { REVIEW_ACTIONS, REVIEW_TOOL, createReviewEntry } from '../lib/review-tools.js'
+import { HANDOFF_TOOL, REVIEW_ACTIONS, REVIEW_TOOL, createReviewEntry } from '../lib/review-tools.js'
 import { FINAL_VERIFICATION_ITEMS, buildDraft, buildPlanSkeleton } from '../skills/ulw-plan/scripts/plan-templates.mjs'
 
 const ROOT = new URL('../', import.meta.url)
@@ -38,6 +38,7 @@ function jsonBlockAfter(markdown, marker) {
 
 test('the documented entrypoints have the exact registered identities and actions', async () => {
   assert.equal(REVIEW_TOOL, 'ulw_review')
+  assert.equal(HANDOFF_TOOL, 'ulw_handoff')
   assert.equal(ULW_REVIEW_COMMAND, 'ulw-review')
   assert.deepEqual([...REVIEW_ACTIONS], ['require', 'start', 'wait', 'status', 'cancel'])
   assert.deepEqual([...HANDOFF_ACTIONS], ['check', 'bootstrap', 'bind-worktree'])
@@ -66,9 +67,17 @@ test('the documented entrypoints have the exact registered identities and action
     { config: { review: { enabled: false } }, assemble: async () => null },
   )
   entry.start()
-  assert.equal(registered.length, 1)
-  assert.equal(registered[0].name, REVIEW_TOOL)
-  assert.deepEqual([...registered[0].parameters.properties.action.enum], [...REVIEW_ACTIONS])
+  assert.equal(registered.length, 2)
+  const definitions = new Map(registered.map(definition => [definition.name, definition]))
+  assert.deepEqual([...definitions.keys()].sort(), [HANDOFF_TOOL, REVIEW_TOOL].sort())
+  const reviewDefinition = definitions.get(REVIEW_TOOL)
+  const handoffDefinition = definitions.get(HANDOFF_TOOL)
+  assert.ok(reviewDefinition)
+  assert.ok(handoffDefinition)
+  assert.deepEqual([...reviewDefinition.parameters.properties.action.enum], [...REVIEW_ACTIONS])
+  assert.deepEqual([...handoffDefinition.parameters.properties.action.enum], [...HANDOFF_ACTIONS])
+  assert.deepEqual([...handoffDefinition.parameters.required].sort(), ['action', 'target'])
+  assert.deepEqual(Object.keys(handoffDefinition.parameters.properties).sort(), ['action', 'target', 'worktreePath'])
   await entry.dispose()
 })
 
