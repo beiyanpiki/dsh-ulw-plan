@@ -19,12 +19,14 @@ import {
   REVIEW_TOOL,
   REVIEW_TOOL_OUTPUT_SCHEMA,
   REVIEW_TOOL_PARAMETERS,
+  activeExecuteLease,
   buildReviewEnvelope,
   capabilityStatus,
   createReviewEntry,
   handoffToolDefinition,
   renderHandoffEnvelope,
   renderReviewEnvelope,
+  reviewLeaseGate,
   reviewToolDefinition,
 } from '../lib/review-tools.js'
 
@@ -620,4 +622,216 @@ test('a second start never double-assembles or double-registers the handoff tool
   await second()
   assert.deepEqual(assembly.order, ['handoff:dispose', 'settle', 'close-store', 'release'])
   assert.deepEqual(ctx.registry.removed, [REVIEW_TOOL, HANDOFF_TOOL])
+})
+// ---------------------------------------------------------------------------
+// ULW row 34: ulw_review shares the command's active-execute lease rule
+// ---------------------------------------------------------------------------
+
+/** One handoff snapshot as the authority reports it (leased or bound). */
+function executeLeaseSnapshot(overrides = {}) {
+  return {
+    status: 'leased',
+    required: true,
+    lease: { handoffId: 'handoff-test-1', required: true },
+    ...overrides,
+  }
+}
+
+/**
+ * An entry whose session projects one mode and whose Host-owned handoff
+ * answers a scripted lease snapshot. The real shipped entry reads exactly
+ * these two surfaces (ctx.handoff, ctx.sessionProjections), so this exercises
+ * the same rule the slash command applies.
+ */
+function leaseEntry(mode, snapshots = {}, options = {}) {
+  const ctx = fakeCtx()
+  const calls = []
+  ctx.sessionProjections = { stateOf: (_session, key) => (key === 'ulwMode' ? { mode } : undefined) }
+  ctx.handoff = {
+    calls,
+    stateForSession(sessionId) {
+      calls.push(sessionId)
+      if (options.throw === true) throw new Error('handoff lease state unavailable')
+      if (options.async === true) return Promise.resolve(snapshots[sessionId] ?? null)
+      return snapshots[sessionId] ?? null
+    },
+  }
+  const assembly = scriptedAssembly(options.script ?? {})
+  const entry = createReviewEntry(ctx, {
+    config: { review: { enabled: true, callBudget: 2 } },
+    assemble: async () => assembly,
+  })
+  const dispose = entry.start()
+  return { ctx, calls, assembly, entry, dispose }
+}
+
+const reviewAgent = () => ({ session: { id: 'session-1', header: { cwd: '/tmp/ws' } } })
+
+test('row 34: an active execute lease refuses require and start with HANDOFF_ACTIVE_EXECUTE', async () => {
+  for (const status of ['leased', 'bound']) {
+    const { entry, assembly, dispose } = leaseEntry('execute', { 'session-1': executeLeaseSnapshot({ status }) })
+    await entry.ready
+    for (const action of ['require', 'start']) {
+      const value = await entry.controller.invoke({ action, target: TARGET }, execFor())
+      assert.equal(value.ok, false, action + '/' + status)
+      assert.equal(value.phase, 'rejected', action + '/' + status)
+      assert.equal(value.code, 'HANDOFF_ACTIVE_EXECUTE', action + '/' + status)
+      assert.equal(value.accepted, false, action + '/' + status)
+      assert.equal(value.completed, false)
+      assert.equal(value.approved, false)
+      assert.equal(value.roundId, '', 'a refusal never exposes a round id')
+      assert.deepEqual(value.diagnostics.map((entry) => entry.code), ['HANDOFF_ACTIVE_EXECUTE'])
+      const rendered = renderReviewEnvelope(value).map((block) => block.text).join('\n')
+      assert.match(rendered, /HANDOFF_ACTIVE_EXECUTE/)
+      assert.match(rendered, /completed: no/)
+      assert.equal(/accepted but NOT completed|accepted round/.test(rendered), false, 'a refusal never reads as an accepted round')
+    }
+    assert.equal(assembly.invocations.length, 0, 'the gate refuses before the coordinator can create a round or activation')
+    await dispose()
+  }
+})
+
+test('row 34: the command router refuses inside the same lease and returns no receipt', async () => {
+  const { entry, assembly, dispose } = leaseEntry('execute', { 'session-1': executeLeaseSnapshot() })
+  await entry.ready
+  const outcome = await entry.router.command({
+    target: { ok: true, absolute: TARGET_ABS },
+    agent: reviewAgent(),
+    signal: new AbortController().signal,
+  })
+  assert.equal(outcome.result.kind, 'error')
+  assert.match(outcome.result.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(outcome.result.text.includes('CAPABILITY_UNAVAILABLE'), false, 'the lease refusal keeps its own stable code')
+  assert.equal(/accepted round|NOT a completed review/.test(outcome.result.text), false, 'a refusal never fabricates a receipt')
+  assert.equal(outcome.followup, null)
+  assert.equal(assembly.invocations.length, 0)
+  await dispose()
+})
+
+test('row 34: execute without a lease, plan and off still accept the requirement; only execute reads the lease', async () => {
+  const required = { ok: true, action: 'require', state: 'required', outcome: 'required', nextAction: 'start', approved: false, approval: { approved: false } }
+
+  // execute, no handoff at all: an old Host keeps row 12 behaviour.
+  const oldHost = leaseEntry('execute', {}, { script: { require: required } })
+  await oldHost.entry.ready
+  const oldValue = await oldHost.entry.controller.invoke({ action: 'require', target: TARGET }, execFor())
+  assert.equal(oldValue.phase, 'live')
+  assert.equal(oldValue.accepted, true)
+  assert.equal(oldHost.assembly.invocations.length, 1)
+  await oldHost.dispose()
+
+  // execute with a handoff that knows no lease for this session: accepted, consulted once.
+  const noLease = leaseEntry('execute', {}, { script: { require: required } })
+  await noLease.entry.ready
+  const noLeaseValue = await noLease.entry.controller.invoke({ action: 'require', target: TARGET }, execFor())
+  assert.equal(noLeaseValue.phase, 'live')
+  assert.equal(noLeaseValue.accepted, true)
+  assert.deepEqual(noLease.calls, ['session-1'])
+  await noLease.dispose()
+
+  // plan and off: the lingering execute lease is irrelevant, exactly like the command.
+  for (const mode of ['plan', 'off']) {
+    const accepted = leaseEntry(mode, { 'session-1': executeLeaseSnapshot() }, { script: { require: required } })
+    await accepted.entry.ready
+    const value = await accepted.entry.controller.invoke({ action: 'require', target: TARGET }, execFor())
+    assert.equal(value.phase, 'live', mode)
+    assert.equal(value.accepted, true, mode)
+    assert.equal(value.code, '', mode)
+    assert.deepEqual(accepted.calls, [], mode + ' must not consult the execute lease')
+    await accepted.dispose()
+  }
+})
+
+test('row 34: an unreadable or asynchronous lease lookup fails closed with CAPABILITY_UNAVAILABLE', async () => {
+  for (const [name, options] of [['throwing', { throw: true }], ['asynchronous', { async: true }]]) {
+    const { entry, assembly, dispose } = leaseEntry('execute', { 'session-1': executeLeaseSnapshot() }, options)
+    await entry.ready
+    for (const action of ['require', 'start']) {
+      const value = await entry.controller.invoke({ action, target: TARGET }, execFor())
+      assert.equal(value.ok, false, name + '/' + action)
+      assert.equal(value.phase, 'rejected', name + '/' + action)
+      assert.equal(value.code, 'CAPABILITY_UNAVAILABLE', name + '/' + action)
+      assert.equal(value.code === 'HANDOFF_ACTIVE_EXECUTE', false, 'a failed lookup is not a lease refusal')
+      assert.equal(value.accepted, false)
+      assert.equal(value.roundId, '')
+    }
+    const outcome = await entry.router.command({
+      target: { ok: true, absolute: TARGET_ABS },
+      agent: reviewAgent(),
+      signal: new AbortController().signal,
+    })
+    assert.equal(outcome.result.kind, 'error')
+    assert.match(outcome.result.text, /CAPABILITY_UNAVAILABLE/)
+    assert.equal(outcome.followup, null)
+    assert.equal(assembly.invocations.length, 0, name + ' never reaches the coordinator')
+    await dispose()
+  }
+})
+
+test('row 34: status, wait and cancel keep their semantics while an execute lease is active', async () => {
+  const live = {
+    ok: true, state: 'in_flight', outcome: 'in_flight', round: round(), lanes: boundLanes,
+    approved: false, approval: { approved: false },
+  }
+  const script = {
+    status: { ...live, action: 'status' },
+    wait: { ...live, action: 'wait' },
+    cancel: {
+      ok: true, action: 'cancel', state: 'cancelled', outcome: 'cancelled',
+      round: round({ state: 'cancelled' }), approved: false, approval: { approved: false },
+    },
+  }
+  const { entry, assembly, calls, dispose } = leaseEntry('execute', { 'session-1': executeLeaseSnapshot() }, { script })
+  await entry.ready
+  const status = await entry.controller.invoke({ action: 'status', roundId: 'round-1' }, execFor())
+  assert.equal(status.phase, 'live')
+  assert.equal(status.roundId, 'round-1')
+  assert.equal(status.accepted, true)
+  const waited = await entry.controller.invoke({ action: 'wait', roundId: 'round-1' }, execFor())
+  assert.equal(waited.phase, 'live')
+  assert.equal(waited.roundId, 'round-1')
+  const cancelled = await entry.controller.invoke({ action: 'cancel', roundId: 'round-1' }, execFor())
+  assert.equal(cancelled.phase, 'terminal')
+  assert.equal(cancelled.state, 'cancelled')
+  assert.equal(cancelled.accepted, false)
+  assert.equal(cancelled.completed, false)
+  assert.deepEqual(assembly.invocations.map((call) => call.action), ['status', 'wait', 'cancel'])
+  assert.deepEqual(calls, [], 'status/wait/cancel never consult the execute lease')
+  await dispose()
+})
+test('row 34: the shared lease predicate matches the command for every handoff snapshot', () => {
+  const agent = { session: { id: 'session-1', header: { cwd: '/tmp/ws' } } }
+  const handoffOf = (value) => ({ calls: [], stateForSession() { this.calls.push('session-1'); return value } })
+
+  // No authority, no session identity, or no state: nothing can be leased.
+  assert.deepEqual(activeExecuteLease(undefined, agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease({}, agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(handoffOf(null), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(handoffOf(undefined), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(handoffOf({ status: 'leased', lease: null }), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(handoffOf({ status: 'revoked', lease: { handoffId: 'h' } }), agent), { known: true, active: false })
+  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot()), { session: { header: {} } }), { known: true, active: false })
+
+  // A lease in leased or bound status is the one active-execute refusal.
+  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot({ status: 'leased' })), agent), { known: true, active: true })
+  assert.deepEqual(activeExecuteLease(handoffOf(executeLeaseSnapshot({ status: 'bound' })), agent), { known: true, active: true })
+
+  // A throwing or asynchronous lookup is never a lease snapshot.
+  assert.deepEqual(activeExecuteLease({ stateForSession() { throw new Error('unreadable') } }, agent), { known: false, active: false })
+  assert.deepEqual(activeExecuteLease({ stateForSession: async () => executeLeaseSnapshot() }, agent), { known: false, active: false })
+
+  // The mode gate: only execute consults the handoff at all.
+  const calls = []
+  const ctx = {
+    sessionProjections: { stateOf: () => ({ mode: 'plan' }) },
+    handoff: { stateForSession(sessionId) { calls.push(sessionId); return executeLeaseSnapshot() } },
+  }
+  assert.equal(reviewLeaseGate(ctx, agent), null)
+  assert.deepEqual(calls, [])
+  ctx.sessionProjections = { stateOf: () => ({ mode: 'execute' }) }
+  const refused = reviewLeaseGate(ctx, agent)
+  assert.equal(refused.code, 'HANDOFF_ACTIVE_EXECUTE')
+  assert.match(refused.detail, /ulw_handoff check/)
+  ctx.handoff = { stateForSession() { throw new Error('unreadable') } }
+  assert.equal(reviewLeaseGate(ctx, agent).code, 'CAPABILITY_UNAVAILABLE')
 })
