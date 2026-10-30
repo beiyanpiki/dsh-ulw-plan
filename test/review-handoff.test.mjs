@@ -755,3 +755,114 @@ test('an explicit host release unpins the session and revokes its handoff', asyn
   const agent = agentFor(f, 'author-1')
   assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), undefined)
 })
+
+
+test('an invalid required re-check keeps the conflict hold until a valid lease', async t => {
+  const f = await workspacePlan(t)
+  const review = reviewDouble(approvalFor(f.text))
+  const service = serviceFor(t, f, review)
+  const first = await service.check(check(f.target), ctx())
+  assert.equal(first.ok, true, JSON.stringify(first))
+  const before = service.stateForSession('author-1')
+  review.set({
+    ok: true, exists: true, required: false, approved: false, state: 'cancelled',
+    roundId: null, revision: 2, persisted: false, nextAction: null, source: digests(f.text),
+  })
+  denied(await service.check(check(f.target), ctx()), 'HANDOFF_SELECTION_REQUIRED', 'review')
+  assert.equal(service.stateForSession('author-1').selectionConflict, true)
+  review.set({
+    ok: true, exists: true, required: true, approved: false, state: 'in_flight',
+    roundId: null, revision: 3, persisted: false, nextAction: 'wait', source: digests(f.text),
+  })
+  denied(await service.check(check(f.target), ctx()), 'HANDOFF_NOT_APPROVED', 'wait')
+  const after = service.stateForSession('author-1')
+  assert.equal(after.selectionConflict, true)
+  assert.equal(after.required, true)
+  assert.equal(after.status, 'leased')
+  assert.deepEqual(after.lease, before.lease)
+  const agent = agentFor(f, 'author-1')
+  const held = service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent })
+  assert.equal(typeof held, 'string')
+  assert.match(held, /HANDOFF_SELECTION_REQUIRED/)
+  review.set(approvalFor(f.text))
+  const recovered = await service.check(check(f.target), ctx())
+  assert.equal(recovered.ok, true, JSON.stringify(recovered))
+  assert.equal(service.stateForSession('author-1').selectionConflict, false)
+  assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), undefined)
+})
+
+test('an ordinary lease release revokes the authorizing handoff', async t => {
+  const f = await workspacePlan(t)
+  const review = reviewDouble({ ok: true, exists: false })
+  const service = serviceFor(t, f, review)
+  const lease = await service.check(check(f.target), ctx())
+  assert.equal(lease.ok, true, JSON.stringify(lease))
+  assert.equal(lease.outcome, 'ordinary_lease')
+  const released = await service.release('author-1', { host: true })
+  assert.equal(released.ok, true, JSON.stringify(released))
+  assert.equal(released.handoffId, lease.handoffId)
+  assert.equal(released.revoked, true)
+  denied(await service.assertLease(lease.lease, { at: 1000, target: f.target }), 'HANDOFF_LEASE_REVOKED', 'check')
+  const agent = agentFor(f, 'author-1')
+  assert.equal(typeof service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), 'string')
+})
+
+test('releasing a delegated child leaves the shared parent handoff active', async t => {
+  const f = await workspacePlan(t)
+  const review = reviewDouble(approvalFor(f.text))
+  const service = serviceFor(t, f, review)
+  const parent = await service.check(check(f.target), ctx())
+  assert.equal(parent.ok, true, JSON.stringify(parent))
+  assert.equal((await service.delegate(parent.handoffId, ctx({ children: ['child-5'] }))).ok, true)
+  const released = await service.release('child-5', { host: true })
+  assert.equal(released.ok, true, JSON.stringify(released))
+  assert.equal(released.handoffId, parent.handoffId)
+  assert.equal(released.revoked, false)
+  assert.equal((await service.assertLease(parent.lease, { at: 1000, target: f.target })).ok, true)
+  const parentAgent = agentFor(f, 'author-1')
+  assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent: parentAgent }), undefined)
+  const childAgent = agentFor(f, 'child-5')
+  assert.equal(typeof service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent: childAgent }), 'string')
+})
+
+test('inheritance alone pins a child referenced by an active required state', async t => {
+  const f = await workspacePlan(t)
+  await writeFile(join(f.workspace, OTHER), '# Other plan\n## Todos\n- [ ] 1. other\n  QA: other\n## Final verification wave\n- [ ] F1. other\n')
+  const review = {
+    approval(identity) {
+      return identity.target === f.target ? approvalFor(f.text) : { ok: true, exists: false }
+    },
+  }
+  // Host-only test seam: create the delegated state without an explicit child pin.
+  const service = serviceFor(t, f, review, { pinDelegated: false })
+  const parent = await service.check(check(f.target), ctx())
+  assert.equal(parent.ok, true, JSON.stringify(parent))
+  assert.equal((await service.delegate(parent.handoffId, ctx({ children: ['child-6'] }))).ok, true)
+  const state = service.stateForSession('child-6')
+  assert.equal(state.target, f.target)
+  assert.equal(state.handoffId, parent.handoffId)
+  denied(await service.check(check(OTHER), ctx({ author: { sessionId: 'child-6' } })), 'HANDOFF_SELECTION_REQUIRED', 'review')
+  assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent: agentFor(f, 'child-6') }), undefined)
+})
+
+test('the delegate pin alone pins a child after the parent revoke', async t => {
+  const f = await workspacePlan(t)
+  await writeFile(join(f.workspace, OTHER), '# Other plan\n## Todos\n- [ ] 1. other\n  QA: other\n## Final verification wave\n- [ ] F1. other\n')
+  const review = {
+    approval(identity) {
+      return identity.target === f.target ? approvalFor(f.text) : { ok: true, exists: false }
+    },
+  }
+  const service = serviceFor(t, f, review)
+  const parent = await service.check(check(f.target), ctx())
+  assert.equal(parent.ok, true, JSON.stringify(parent))
+  assert.equal((await service.delegate(parent.handoffId, ctx({ children: ['child-7'] }))).ok, true)
+  await service.revoke(parent.handoffId, { host: true })
+  const state = service.stateForSession('child-7')
+  assert.equal(state.target, f.target)
+  assert.equal(state.handoffId, parent.handoffId)
+  denied(await service.check(check(OTHER), ctx({ author: { sessionId: 'child-7' } })), 'HANDOFF_SELECTION_REQUIRED', 'review')
+  const guard = service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent: agentFor(f, 'child-7') })
+  assert.equal(typeof guard, 'string')
+  assert.match(guard, /HANDOFF_LEASE_REVOKED/)
+})
