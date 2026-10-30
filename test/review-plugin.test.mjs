@@ -298,6 +298,35 @@ function createHost(options = {}) {
     assert.ok(definition, 'command is not registered: ' + name)
     return definition.handler({ rawInput, agent, signal: new AbortController().signal, attachments: [] })
   }
+  host.guardReason = (agent, name, args = { file_path: 'src/main.ts' }) => {
+    const exec = { agent, name, arguments: args }
+    for (const fn of host.guards.filter(Boolean)) {
+      const reason = fn(exec)
+      if (typeof reason === 'string') return reason
+    }
+    return undefined
+  }
+  host.childSession = (id, overrides = {}) => ({
+    session: {
+      id,
+      header: {
+        cwd: host.workspace,
+        origin: 'subagent',
+        parentSession: host.parent.session.id,
+        delegationDepth: 1,
+        ...overrides,
+      },
+    },
+    ctx: {},
+  })
+  host.emitChildStart = (info, parent = host.parent) => host.emit('subagent/start', { provider: 'spawn', local: true, ...info }, parent)
+  host.waitFor = async (predicate, turns = 200) => {
+    for (let index = 0; index < turns; index += 1) {
+      if (await predicate()) return true
+      await turn()
+    }
+    return false
+  }
   host.unload = async () => {
     for (const value of [...host.effects].reverse()) {
       if (typeof value === 'function') await value()
@@ -333,6 +362,20 @@ async function startRound(host, targetValue = target) {
   const value = await host.invokeTool('ulw_review', { action: 'start', target: targetValue })
   assert.equal(value.phase, 'live', JSON.stringify(value.diagnostics))
   return value
+}
+
+/** Complete the real require/start/wait approval for the fixture plan. */
+async function approveRound(host, targetValue = target) {
+  const started = await startRound(host, targetValue)
+  for (const lane of ['practical', 'adversarial']) await deliverPlan(host, activationOf(host, lane).childId)
+  for (const lane of ['practical', 'adversarial']) {
+    const activation = activationOf(host, lane)
+    activation.deferred.settled = true
+    activation.deferred.resolve(okay(started.round, lane))
+  }
+  const done = await host.invokeTool('ulw_review', { action: 'wait', roundId: started.roundId })
+  assert.equal(done.completed, true, JSON.stringify(done.diagnostics))
+  return done
 }
 
 function activationOf(host, lane) {
@@ -593,8 +636,11 @@ test('dispose follows the owned order, persists the cancelled terminal state and
   assert.ok(indexOf('guard:release:1') > indexOf('store:close'), 'the enhanced guard is released after the store closes')
   assert.ok(indexOf('preset:release:') > indexOf('store:close'), 'presets are released after the store closes')
   assert.ok(indexOf('tool:release:ulw_review') > indexOf('store:close'), 'the tool guard is released after the store closes')
+  assert.ok(indexOf('tool:release:ulw_handoff') > indexOf('store:close'), 'the handoff tool is released after the store closes')
   assert.equal(host.tool('ulw_review'), undefined)
   assert.equal(host.tool('ulw_review_input'), undefined)
+  assert.equal(host.tool('ulw_handoff'), undefined)
+  assert.equal(host.ctx.handoff, undefined)
   assert.equal(host.commandMap.has('ulw-review'), false)
   assert.equal(host.presets.size, 0)
   assert.equal(host.activations.every(activation => activation.disposed === true), true)
@@ -615,7 +661,7 @@ test('HMR unload then reload never double-defines a handler', async () => {
   await apply(host.ctx, rawConfig())
   await flush()
   const count = () => ({ tools: host.toolMap.size, commands: host.commandMap.size, skills: host.skills.size, presets: host.presets.size })
-  assert.deepEqual(count(), { tools: 2, commands: 3, skills: 2, presets: 2 })
+  assert.deepEqual(count(), { tools: 3, commands: 3, skills: 2, presets: 2 })
   assert.equal(host.guards.filter(Boolean).length, 2)
 
   await host.unload()
@@ -624,7 +670,7 @@ test('HMR unload then reload never double-defines a handler', async () => {
 
   await apply(host.ctx, rawConfig())
   await flush()
-  assert.deepEqual(count(), { tools: 2, commands: 3, skills: 2, presets: 2 })
+  assert.deepEqual(count(), { tools: 3, commands: 3, skills: 2, presets: 2 })
   assert.equal(host.guards.filter(Boolean).length, 2)
   const value = await host.invokeTool('ulw_review', { action: 'require', target })
   assert.equal(value.phase, 'live')
@@ -755,4 +801,213 @@ test('a plan status tick is not a stale source and a disabled config never start
   assert.equal(command.kind, 'error')
   assert.equal(disabled.followups.length, 0)
   await disabled.unload()
+})
+
+// ---------------------------------------------------------------------------
+// ULW row 27: the assembled handoff service through the real plugin entry
+// ---------------------------------------------------------------------------
+
+test('execute mode: the three gate tools stay usable while a product write is refused before any lease', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  assert.equal(typeof host.ctx.handoff?.guard, 'function', 'the review sub-effect injects ctx.handoff')
+
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_LEASE_MISSING/)
+  assert.match(host.guardReason(host.parent, 'bash', {}) ?? '', /HANDOFF_LEASE_MISSING/)
+  assert.match(host.guardReason(host.parent, 'subagent', {}) ?? '', /HANDOFF_LEASE_MISSING/)
+  for (const name of ['ulw_handoff', 'ulw_review', 'ulw_review_input']) {
+    assert.equal(host.guardReason(host.parent, name, {}), undefined, name + ' must stay usable before a lease')
+  }
+
+  const required = await host.invokeTool('ulw_review', { action: 'require', target })
+  assert.equal(required.accepted, true)
+  assert.equal(required.completed, false)
+  const refused = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'HANDOFF_NOT_APPROVED')
+  assert.equal(refused.lease, null)
+  assert.equal(refused.required, true)
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /ulw handoff: product writes/)
+  await host.unload()
+})
+
+test('assembled required flow: two-lane approval leases execution, a tick keeps it, an instruction edit revokes it', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+
+  const done = await approveRound(host)
+  assert.equal(done.approved, true)
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_LEASE_MISSING/, 'an approval alone is still not a lease')
+
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.outcome, 'required_lease')
+  assert.equal(checked.required, true)
+  assert.equal(checked.lease.required, true)
+  assert.equal(checked.lease.approvedRoundId, done.roundId)
+  assert.equal(typeof checked.receipt?.roundId, 'string')
+  assert.equal(host.guardReason(host.parent, 'write'), undefined)
+  assert.equal(host.guardReason(host.parent, 'bash', {}), undefined)
+
+  // A legal status tick keeps the required lease.
+  const ticked = VALID_PLAN.replace('- [ ] 1. Demo task', '- [x] 1. Demo task')
+  writeFileSync(join(host.workspace, target), ticked)
+  assert.equal(host.guardReason(host.parent, 'write'), undefined, 'a status tick must not revoke the lease')
+
+  // A plan instruction edit revokes the lease immediately.
+  const edited = ticked.replace('What to do / Must NOT do: demo.', 'What to do / Must NOT do: demo changed after approval.')
+  writeFileSync(join(host.workspace, target), edited)
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_STALE_SOURCE/)
+  assert.match(host.guardReason(host.parent, 'bash', {}) ?? '', /HANDOFF_LEASE_REVOKED|HANDOFF_STALE_SOURCE/)
+  const stale = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.code, 'HANDOFF_STALE_SOURCE')
+  assert.equal(stale.lease, null)
+  await host.unload()
+})
+
+test('execute mode: consultation surfaces stay usable before the ordinary lease and the lease unlocks writes', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+
+  const reviewStatus = await host.invokeTool('ulw_review', { action: 'status', target })
+  assert.equal(reviewStatus.capability.available, true)
+  assert.equal(reviewStatus.approved, false)
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_LEASE_MISSING/)
+
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.outcome, 'ordinary_lease')
+  assert.equal(checked.required, false)
+  assert.equal(checked.lease.required, false)
+  assert.equal(host.guardReason(host.parent, 'write'), undefined)
+  assert.equal(host.guardReason(host.parent, 'bash', {}), undefined)
+  await host.unload()
+})
+
+test('child delegation matrix: a delegated child inherits the parent lease, an undelagated child gets no ordinary lease', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+
+  // The assembly, never the model, pins the implementation child it observes.
+  host.emitChildStart({ id: 'child-delegated', runId: 'run-child-delegated' })
+  const delegatedChild = host.childSession('child-delegated')
+  assert.equal(await host.waitFor(() => host.guardReason(delegatedChild, 'write') === undefined), true, 'a delegated child inherits the parent lease')
+  const childCheck = await host.invokeTool('ulw_handoff', { action: 'check', target }, delegatedChild)
+  assert.equal(childCheck.ok, true, JSON.stringify(childCheck.diagnostics))
+
+  // A child with no delegating handoff cannot mint an ordinary lease.
+  const orphan = host.childSession('child-orphan', { parentSession: 'unknown-parent' })
+  const orphanCheck = await host.invokeTool('ulw_handoff', { action: 'check', target }, orphan)
+  assert.equal(orphanCheck.ok, false)
+  assert.equal(orphanCheck.code, 'HANDOFF_DELEGATE_REJECTED')
+  assert.equal(orphanCheck.lease, null)
+  assert.match(host.guardReason(orphan, 'write') ?? '', /ulw handoff: product writes/)
+
+  // The child is pinned to the parent's plan and cannot divert to another target.
+  writeFileSync(join(host.workspace, '.dsh/ulw/plans/other.md'), '# Other plan\n## Todos\n- [ ] 1. other\n  QA: assert bytes\n## Final verification wave\n- [ ] F1. audit\n')
+  const diverted = await host.invokeTool('ulw_handoff', { action: 'check', target: '.dsh/ulw/plans/other.md' }, delegatedChild)
+  assert.equal(diverted.ok, false)
+  assert.equal(diverted.code, 'HANDOFF_SELECTION_REQUIRED')
+  assert.equal(diverted.lease, null)
+
+  assert.equal(host.guardReason(delegatedChild, 'write'), undefined)
+  await host.unload()
+})
+
+test('a delegated child inherits the required lease and its revocation', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const done = await approveRound(host)
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  assert.equal(checked.required, true)
+
+  host.emitChildStart({ id: 'child-required', runId: 'run-child-required' }, host.parent)
+  const child = host.childSession('child-required')
+  assert.equal(await host.waitFor(() => host.guardReason(child, 'write') === undefined), true, 'the delegated child inherits the required lease')
+  const childCheck = await host.invokeTool('ulw_handoff', { action: 'check', target }, child)
+  assert.equal(childCheck.ok, true, JSON.stringify(childCheck.diagnostics))
+  assert.equal(childCheck.required, true)
+
+  writeFileSync(join(host.workspace, target), VALID_PLAN.replace('What to do / Must NOT do: demo.', 'What to do / Must NOT do: edited while delegated.'))
+  assert.match(host.guardReason(host.parent, 'write') ?? '', /HANDOFF_STALE_SOURCE/)
+  assert.match(host.guardReason(child, 'write') ?? '', /HANDOFF_LEASE_REVOKED/)
+  const revokedChild = await host.invokeTool('ulw_handoff', { action: 'check', target }, child)
+  assert.equal(revokedChild.ok, false)
+  assert.equal(revokedChild.code, 'HANDOFF_LEASE_REVOKED')
+  assert.equal(revokedChild.lease, null)
+  assert.equal(done.approved, true)
+  await host.unload()
+})
+
+test('missing handoff dependencies answer one stable capability code and never a lease', async () => {
+  const noStorage = createHost({ enhanced: ['subagents', 'agentPresets', 'llm'], mode: 'execute' })
+  await apply(noStorage.ctx, rawConfig())
+  await flush()
+  const unavailable = await noStorage.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(unavailable.ok, false)
+  assert.equal(unavailable.code, 'CAPABILITY_UNAVAILABLE')
+  assert.deepEqual([...unavailable.capability.missing], ['storage'])
+  assert.equal(unavailable.lease, null)
+  assert.equal(noStorage.ctx.handoff, undefined)
+  await noStorage.unload()
+
+  const brokenBackend = createHost({ mode: 'execute' })
+  brokenBackend.services.storage = { backend: { get() { return undefined } } }
+  await apply(brokenBackend.ctx, rawConfig())
+  await flush()
+  const failed = await brokenBackend.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.code, 'STORE_UNAVAILABLE')
+  assert.equal(failed.capability.available, false)
+  assert.equal(failed.lease, null)
+  assert.match(brokenBackend.guardReason(brokenBackend.parent, 'write') ?? '', /HANDOFF_REVIEW_UNAVAILABLE/, 'a half-assembled install keeps product writes refused')
+  assert.equal(brokenBackend.guardReason(brokenBackend.parent, 'ulw_handoff', {}), undefined)
+  await brokenBackend.unload()
+  assert.equal(brokenBackend.ctx.handoff, undefined)
+
+  const oldHost = createHost({ enhanced: [], mode: 'execute' })
+  await apply(oldHost.ctx, rawConfig())
+  await flush()
+  const oldValue = await oldHost.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(oldValue.ok, false)
+  assert.equal(oldValue.code, 'CAPABILITY_UNAVAILABLE')
+  assert.deepEqual([...oldValue.capability.missing], ['subagents', 'agentPresets', 'llm', 'storage'])
+  assert.equal(oldHost.ctx.handoff, undefined)
+  assert.equal(oldHost.guardReason(oldHost.parent, 'write'), undefined, 'an old Host keeps row 12 execute behaviour')
+  await oldHost.unload()
+})
+
+test('after dispose no handoff tool, context injection or lease remains', async () => {
+  const host = createHost({ mode: 'execute' })
+  await apply(host.ctx, rawConfig())
+  await flush()
+  const checked = await host.invokeTool('ulw_handoff', { action: 'check', target })
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+  const authority = host.ctx.handoff
+  const staleDefinition = host.tool('ulw_handoff')
+  assert.equal(authority.stateForSession('parent-session')?.lease?.handoffId, checked.handoffId)
+
+  await host.unload()
+  assert.equal(host.tool('ulw_handoff'), undefined)
+  assert.equal(host.tool('ulw_review'), undefined)
+  assert.equal(host.ctx.handoff, undefined)
+  assert.equal(authority.stateForSession('parent-session'), null)
+  assert.equal(host.guards.filter(Boolean).length, 0)
+  const stale = await staleDefinition.execute({ action: 'check', target }, {
+    agent: host.parent,
+    callId: 'stale-call',
+    signal: new AbortController().signal,
+  })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.code, 'CAPABILITY_UNAVAILABLE')
+  assert.equal(stale.lease, null)
 })
