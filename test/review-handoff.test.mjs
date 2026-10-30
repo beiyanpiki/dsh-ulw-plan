@@ -389,6 +389,64 @@ test('a legal tick keeps the lease; an instruction edit revokes it immediately',
   assert.match(guard, /HANDOFF_STALE_SOURCE/)
 })
 
+test('a legal status tick keeps a fresh required check valid and an instruction edit revokes', async t => {
+  const f = await workspacePlan(t)
+  const review = reviewDouble(approvalFor(f.text))
+  const service = serviceFor(t, f, review)
+  const first = await service.check(check(f.target), ctx())
+  assert.equal(first.ok, true, JSON.stringify(first))
+  const reviewed = digests(f.text)
+
+  const ticked = applyTick(f.text, '1', 'x')
+  assert.equal(ticked.changed, true)
+  await writeFile(f.path, ticked.content)
+  const tickedText = ticked.content.toString('utf8')
+  const live = digests(tickedText)
+  assert.equal(live.instructionSha256, reviewed.instructionSha256, 'a status tick keeps instruction identity')
+  assert.notEqual(live.planSha256, reviewed.planSha256, 'a status tick changes raw bytes')
+
+  // Before the coordinator records the source tick the durable approval still
+  // carries the pre-tick raw. The freshness authority is the instruction hash,
+  // so the fresh check must accept that raw drift instead of calling it stale.
+  const beforeStart = await service.check(check(f.target), ctx())
+  assert.equal(beforeStart.ok, true, JSON.stringify(beforeStart))
+  assert.equal(beforeStart.outcome, 'required_lease')
+  assert.equal(beforeStart.lease.instructionSha256, reviewed.instructionSha256)
+  assert.equal(beforeStart.lease.planSha256, live.planSha256)
+  const agent = agentFor(f, 'author-1')
+  assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), undefined)
+
+  // A source_tick records the ticked raw while both receipts keep binding the
+  // reviewed raw: the fresh check still verifies receipts against the reviewed
+  // digest and instruction, never against the live raw.
+  review.set(approvalFor(tickedText, { receipts: receiptsFor('round-1', reviewed) }))
+  const afterStart = await service.check(check(f.target), ctx())
+  assert.equal(afterStart.ok, true, JSON.stringify(afterStart))
+  assert.equal(afterStart.outcome, 'required_lease')
+  assert.equal(afterStart.lease.approvedSourceSha256, live.planSha256)
+  assert.equal(afterStart.receipt.lanes.every(lane => lane.planSha256 === reviewed.planSha256), true)
+  assert.equal((await service.assertLease(afterStart.lease, { at: 1000, target: f.target })).ok, true)
+  assert.equal(service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent }), undefined)
+
+  // An instruction edit still revokes on the next check and at the guard.
+  await writeFile(f.path, tickedText.replace('QA: assert bytes', 'QA: changed check'))
+  denied(await service.check(check(f.target), ctx()), 'HANDOFF_STALE_SOURCE', 'review')
+  const guard = service.guard({ name: 'write', arguments: { file_path: 'src/main.ts' }, agent })
+  assert.equal(typeof guard, 'string')
+  assert.match(guard, /HANDOFF_STALE_SOURCE/)
+})
+
+test('receipts that disagree on the reviewed raw are refused', async t => {
+  const f = await workspacePlan(t)
+  const reviewed = digests(f.text)
+  const mixed = {
+    practical: laneReceipt('practical', 'round-1', reviewed),
+    adversarial: laneReceipt('adversarial', 'round-1', { ...reviewed, planSha256: '9'.repeat(64) }),
+  }
+  const review = reviewDouble(approvalFor(f.text, { receipts: mixed }))
+  denied(await serviceFor(t, f, review).check(check(f.target), ctx()), 'HANDOFF_RECEIPT_INVALID', 'review')
+})
+
 test('a superseded lease from an earlier round reports approval drift', async t => {
   const f = await workspacePlan(t)
   const review = reviewDouble(approvalFor(f.text))

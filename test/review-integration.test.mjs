@@ -1422,7 +1422,7 @@ test('matrix closure: no network attempt, no unhandled rejection, no owned handl
 })
 
 // ---------------------------------------------------------------------------
-// product gaps observed by this matrix, preserved red (not worked around)
+// product contracts proven through the real entry and the real modules
 // ---------------------------------------------------------------------------
 
 test('the shipped entry assembles ulw_handoff and an execute lease guard that refuses before a required lease', async t => {
@@ -1484,8 +1484,82 @@ test('the shipped entry assembles ulw_handoff and an execute lease guard that re
   t.diagnostic('entry handoff: registered=3 preLeaseWrite=HANDOFF_LEASE_MISSING preLeaseBash=HANDOFF_LEASE_MISSING requiredLease=yes postLeaseWrite=allowed postLeaseBash=allowed')
 })
 
-test('PRODUCT GAP (red): a fresh required handoff check after a legal status tick refuses', {
-  skip: 'observed: pre-coordinator tick leaves the durable source pre-tick so check returns HANDOFF_STALE_SOURCE; after start reuses the approved round (source_tick) the receipts bind the pre-tick raw so check returns HANDOFF_RECEIPT_INVALID; see the status-tick row diagnostic and $E/task-15.txt',
-}, () => {
-  assert.fail('a legal status-only tick must not block a fresh required check; instruction identity, not raw status bytes, is the re-check authority')
+test('a legal status tick keeps a fresh required handoff check re-checkable; an instruction edit revokes it', async t => {
+  const world = await createWorld(t)
+  let summary = null
+  try {
+    const { round } = await approvedRound(world)
+    const instruction = round.source.instructionSha256
+    const reviewedRaw = round.source.planSha256
+
+    const first = await world.handoffCheck()
+    assert.equal(first.ok, true, JSON.stringify(first.diagnostics))
+    assert.equal(first.outcome, 'required_lease')
+
+    world.writePlan(LOCAL_TICKED)
+    assert.equal(world.planInstruction(), instruction, 'a legal status tick keeps instruction identity')
+    assert.notEqual(world.planSha(), reviewedRaw, 'a legal status tick changes raw bytes')
+    const tickedRaw = world.planSha()
+
+    // Before the coordinator records the source tick the durable approval still
+    // carries the reviewed raw. The fresh re-check must use instruction identity,
+    // not raw bytes, as the freshness authority.
+    const beforeStart = await world.handoffCheck()
+    assert.equal(beforeStart.ok, true, JSON.stringify(beforeStart.diagnostics))
+    assert.equal(beforeStart.outcome, 'required_lease')
+    assert.equal(beforeStart.lease.instructionSha256, instruction)
+    assert.equal(beforeStart.lease.planSha256, tickedRaw)
+    assert.equal(world.writeProbe().allowed, true, world.writeProbe().reason)
+
+    // start reuses the approved round and records the ticked raw as source_tick;
+    // both lane receipts keep binding the reviewed raw.
+    const reused = await world.start()
+    assert.equal(reused.ok, true, JSON.stringify(reused.diagnostics))
+    assert.equal(reused.outcome, 'existing_round')
+    assert.equal(reused.reused, true)
+    assert.equal(world.subagents.calls, 2, 'a status tick starts no reviewer')
+    const status = world.store.status({ workspace: world.workspace, target: world.target })
+    assert.equal(status.record.source.instructionSha256, instruction)
+    assert.equal(status.record.source.planSha256, tickedRaw, 'the durable source follows the ticked raw')
+    assert.equal(status.approval.source.planSha256, tickedRaw)
+    for (const lane of REVIEW_LANES) {
+      assert.equal(status.approval.receipts[lane].planSha256, reviewedRaw, 'the receipt binds the reviewed raw')
+      assert.equal(status.approval.receipts[lane].instructionSha256, instruction)
+    }
+
+    const afterStart = await world.handoffCheck()
+    assert.equal(afterStart.ok, true, JSON.stringify(afterStart.diagnostics))
+    assert.equal(afterStart.outcome, 'required_lease')
+    assert.equal(afterStart.lease.instructionSha256, instruction)
+    assert.equal(afterStart.lease.planSha256, tickedRaw)
+    assert.equal(afterStart.lease.approvedSourceSha256, tickedRaw)
+    for (const lane of afterStart.receipt.lanes) assert.equal(lane.planSha256, reviewedRaw, 'the receipt view reports the reviewed raw')
+    assert.equal(world.writeProbe().allowed, true, world.writeProbe().reason)
+    assert.equal(world.bashProbe().allowed, true, 'a legal status tick keeps the guard permissive')
+    assert.equal(world.writeProbe().allowed, true)
+    assert.equal(world.spies.write, 0, 'a re-check never runs a side effect')
+
+    // An instruction edit still revokes on the next check and at the guard.
+    world.writePlan(LOCAL_FIXED)
+    assert.notEqual(world.planInstruction(), instruction)
+    const edited = await world.handoffCheck()
+    assert.equal(edited.ok, false)
+    assert.equal(edited.code, 'HANDOFF_STALE_SOURCE')
+    assert.equal(edited.nextAction, 'review')
+    assert.equal(edited.lease ?? null, null, 'a revoked re-check grants no lease')
+    const deniedProbe = world.writeProbe()
+    assert.equal(deniedProbe.allowed, false, 'an instruction edit revokes execute')
+    assert.match(deniedProbe.reason ?? '', /HANDOFF_STALE_SOURCE|ulw handoff/)
+    assert.equal(world.subagents.calls, 2, 'a revocation starts no reviewer')
+    summary = { state: 'approved' }
+    t.diagnostic('status-tick: freshCheckBeforeSourceTick=required_lease freshCheckAfterSourceTick=required_lease guard=allowed instructionEdit=HANDOFF_STALE_SOURCE starts=2')
+  } finally {
+    const cleanup = await world.close()
+    world.cleanupReceipt = cleanup
+  }
+  assert.equal(world.cleanupReceipt.approved, 2)
+  assert.equal(world.cleanupReceipt.starts, 2)
+  assertNoLeak(world, 'status-tick-recheck')
+  world.assertClean()
+  assert.equal(summary.state, 'approved')
 })
