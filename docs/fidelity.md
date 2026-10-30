@@ -134,6 +134,8 @@ When translating `load_skills=[...]`, load the named skill inside the spawned ag
 
 ## 6. A3：新增 `skills/ulw-plan/references/dsh-harness.md`
 
+> **历史（A5 之后）**：本节是 A3 阶段追加文件的原文。其中的 `task` alias 表、`metis`/`momus`/`oracle` 预设和「momus/oracle 双子代理保持独立」的说法已随 A4 删除；现行 review 面见第 9 节的基础面与第 10 节的 Host 双评审。保留原文只记录 A3 曾追加过什么，不要据此配置或排障。
+
 ````markdown
 ---
 name: ulw-plan
@@ -207,9 +209,11 @@ What the guard deliberately does **not** do:
 The mode is per session and survives resume/fork through the `ulwMode` projection. Subagent sessions start at `off`, so a read-only role child is never fenced by the parent's planning mode.
 ````
 
+> 上文的 Role aliases / Category semantics 是 A3 形态：`task` 工具与这些 alias 均已在 A4 删除；现行子代理是原生 `subagent`，评审是固定 namespaced preset（第 10 节）。
+
 ## 7. 已知行为差异
 
-> 以下第 1–5 条为 A4 重构**之前**的历史记录，已被第 9 节的 DSH-native 形态取代，保留作对照；第 6–10 条仍然有效。
+> 以下第 1–5 条为 A4 重构**之前**的历史记录，已被第 9 节的 DSH-native 形态取代，保留作对照。第 6、7、9、10 条仍然有效；第 8 条只对 **plan 模式**成立——execute 模式的 `bash` 由 handoff 执行 lease 门禁（第 10.2 节）。
 
 1. ~~`task` **一律内联**~~（A4 后 `task` 工具已删除，见第 9 节）。
 2. ~~没有 `task_output` / `task_send` / `task_cancel`~~（A4 后委托走原生 `subagent`，通知与 `send_message` / `interrupt_agent` 均为 Host 自带）。
@@ -218,7 +222,7 @@ The mode is per session and survives resume/fork through the `ulwMode` projectio
 5. ~~plan-gate 三条件~~（A4 后由命令校验承担：`/ulw-review` 校验唯一目标，两条角色命令在 `execute` 模式拒绝）。
 6. 新增 `/ulw-mode off|plan|execute` 逃生口（omo 没有）。
 7. ledger 路径为 `.dsh/ulw/ulw-execute/ledger.jsonl`（机械改名结果）。
-8. guard 只管 `write` / `edit`，不管 `bash`（与 omo 的 prometheus-md-only 一致）。
+8. guard 在 **plan 模式**只拦 `write` / `edit`，不拦 `bash`（与 omo 的 prometheus-md-only 一致；`scaffold-plan.mjs` 靠 bash 产出文件）。**execute 模式**的 `bash`、`run_code`、产品写入与实现委托由 `ulw_handoff` 执行 lease 门禁：未取得 lease 前拒绝（第 10.2 节）。
 9. `ulw-execute` 正文保留 omo 的 `codex:<session_id>` 原文；A2 的 DSH 兼容节把前缀映射为 `dsh:<session_id>`，并声明「本节优先」。
 10. 模型通过 `skill` 工具自行加载 `ulw-plan` 不会切换模式：投影只折叠用户显式 `/ulw-plan` 的 `skill-invocation` 消息。要进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
 
@@ -240,7 +244,9 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 
 ## 9. A4：DSH-native 重构（2026-10-23）
 
-按「更适配 DSH」的目标重构 agent 面：**不再移植 omo 的 agent 机制**。第 2 节的表格从此是历史基线（记录最初端口的字节来源），本节记录现行状态。
+按「更适配 DSH」的目标重构 agent 面：**不再移植 omo 的 agent 机制**。第 2 节的表格从此是历史基线（记录最初端口的字节来源），本节记录 A4 当时的状态。
+
+> **A5 注记**：本节是 A4 阶段的快照。9.3 的 inline `/ulw-review`、9.4 的「单车道」改写与哈希、9.5 的 1/4 条已被第 10 节的 Host 双评审取代；9.4 表格里的 sha256 也是 A4 当时的值，不是现行哈希。保留本节用于对照，不要当作现行契约。
 
 ### 9.1 删除（本地首创组件，无 omo 对应字节）
 
@@ -265,6 +271,8 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 - `lib/commands.js` 的 `/ulw-consult <request>` 与 `/ulw-review <plan-path>`：校验后通过 `agent.followup` 把契约文本注入当前会话（与 Host `/goal` 同一座桥；消息构造为 `{role:'user', source:{kind:'user'}}`，不依赖 `@deepseek-ai/dsh-llm`）。`/ulw-review` 同时注入字面绝对路径与命令时刻的 sha256。
 - `skills/ulw-plan/references/research-lanes.md`（sha256 `dd352b75057ad6951d595d0718127ca0965224335f55d407a8780dda00cff216`）：explorer / librarian 车道模板 + 原生 `subagent` 派发纪律。
 
+> **A5 注记**：上面「`/ulw-review` 注入契约」只对无 router 的独立组合成立。发货入口（`lib/index.js` 注入 `createReviewEntry` 的 router）现在登记要求并接受一轮 Host 双评审；inline 注入不是安装后的审批路径。详见第 10 节。
+
 ### 9.4 改写（omo 字节 + 结构性手改）
 
 | 文件 | 现行 sha256 | 改动性质 |
@@ -279,7 +287,44 @@ sha256sum skills/ulw-plan/SKILL.md skills/ulw-plan/references/full-workflow.md \
 
 ### 9.5 语义要点
 
+> **A5 注记**：本节 1/4 条是 A4 单车道阶段的表述。Host 双评审装配可用时，评审由两条 namespaced preset 的原生子会话承担；「不派生独立子代理」只适用于基础面/能力缺失的退回路径。见第 10 节。
+
 1. **high-accuracy 评审并入 plan 步骤**：评审是规划会话内的工作流步骤（同一契约、单车道、有界收敛、草稿内轮次收据 + 交付前活体摘要复验），不再派生 momus/oracle 子代理；`/ulw-review` 是用户按需触发同一契约的会话内命令。
 2. **explore / librarian 集成而非独立 agent**：研究车道是提示词模板，经 Host 原生 `subagent` / `subagent_fork` 派发；规划会话自身的 read / glob / grep / web 工具也始终可用。
 3. **consultant / reviewer 只以命令提供**：`/ulw-consult`、`/ulw-review` 在对话中直接调用（`execute` 模式拒绝，命令文本给出退出口）；plan 工作流内部则直接采纳 references 里的同一契约，不经命令。
 4. **评审独立性换形**：双 fresh-preset 子代理的独立性由「契约驱动 + 磁盘重读 + 摘要锚定 + 有界收敛」承担——这是与 omo 的真实行为差异，不是缺陷隐瞒。
+
+## 10. A5：Host 双评审与执行交接（2026-10-30）
+
+本节记录现行的 review 面，取代第 6 节的 alias 表与 9.5 的单车道表述。基础工作流（`/ulw-plan`、`/ulw-execute`、`/ulw-consult`、`/ulw-mode`、guard）不受影响。
+
+### 10.1 装配、能力检测与版本
+
+- 根入口 `apply(ctx, config)` 始终注册 projection、guard、`/ulw-mode`、`/ulw-consult` 与两个技能；增强评审在独立 sub-effect 中装配。
+- 增强服务按 **API 检测**：`subagents`、`agentPresets`、`llm`、`storage` 逐个 `ctx.get()`；缺任何一个都不完成装配。工具仍然注册（`createReviewEntry` 先注册 `ulw_review` / `ulw_handoff` 与 `/ulw-review` router），入口回答 `CAPABILITY_UNAVAILABLE` 并列出 missing。基础面继续工作，且**不会**退回 inline 审批。
+- 已验证 DSH 版本：**0.2.1-rc.4**（本机安装版本）。`package.json` 的 `engines.dsh` 仍为 `>=0.2.0-rc.2`，那只是基础面下限；该版本早于这组增强 API，未验证，文档不声称旧下限已经具备它们。旧 Host 上增强入口给诊断，不谎报评审完成。
+- 配置是 `apply` 的 `config.review`，由 `lib/review-config.js` 纯解析：默认 `enabled:false`、`storageBackend:'json'`、`backend:'spawn'`、`callBudget:0`（零调用）。此时工具仍注册，但 `require` / `start` 以 `CAPABILITY_UNAVAILABLE`（disabled or lacks explicit authorization）拒绝，不产生 requirement。`enabled:true` 必须同时有双路由与正偶数 `callBudget`；两路 `normalizeModelId` 相同即拒。错误码：`INVALID_CONFIG`、`ROUTE_UNAUTHORIZED`、`BUDGET_EXHAUSTED`、`CAPABILITY_UNAVAILABLE`。
+- 示例（不含密钥、经解析器断言）在 README；`test/review-package.test.mjs` 直接读取该示例并调用真实解析器。
+
+### 10.2 运行面（现行）
+
+- 工具：`ulw_review`（`require|start|wait|status|cancel`）与 `ulw_handoff`（`check|bootstrap|bind-worktree`）；`/ulw-review` 与工具共享同一协调器，命令只返回「已接受，未完成」的回执。
+- 两车道 `practical` / `adversarial` 各用 namespaced preset（`ulw-plan-review-practical` / `ulw-plan-review-adversarial`），`provider:'spawn'`、`delivery:'caller'`、显式 `agentOptions` 与受支持 `outputSchema`；两路一起发起，首份结果不回喂第二路。
+- 输入：服务一次读取不可变 Buffer，身份为 canonical workspace + `.dsh/ulw/plans/<slug>.md` + raw SHA-256；reviewer 只能通过 `ulw_review_input` 分页（至多 16 KiB/页）读取，覆盖连续完整后才允许证据工具与结构化结果。
+- 状态：Host storage 中一个计划一个 record（requirements、current round、history、source/policy/contract hashes、两 lane receipt）；`approved` 需要两个完整、绑定同一 round/launch/source 的终态回执。draft/OKAY 文本永远不是批准。
+- 交接：`check` 绑定 canonical source 与 instruction hash，只有可信 required 记录才要求双审；未取得 lease 前 `bash` / `run_code` / 产品写入 / 实现委托被拒，已经拿到 lease 的 execute 只允许合法任务状态位（`[ ]/[x]/[~]`）变化，instruction 变更撤销 lease 并要求重审。`bootstrap` 调现有 scaffold 函数，不靠放行 bash。
+- 分发：包名/版本（`dsh-ulw-plan@0.1.0`）、bundle row id（`omo`）与零生产依赖不变；`files` 覆盖 `lib/`、`skills/`（含 `plan-lint.mjs` 与两份 reviewer 契约）、`locale/`、`docs/fidelity.md`、`docs/publishing.md`、`cordis.patch.yml`、`icon.svg`、README、LICENSE；内部迁移记录 `docs/migration-plan.md` 与 `test/`、`qa/`、`.dsh/`、`.vendor/` 不进 tarball（迁移记录含本机绝对路径）。CI 在 Node 22/24/26 上跑测试；syntax、rename gate 与 pack 清单在 Node 24 的 packaging job 里跑。
+
+### 10.3 与 OMO 的差异（记录，不粉饰）
+
+1. **portable snapshot，不是 native openat 链**：输入用普通 Node 的打开/`fstat`/读/hash + realpath/常规文件/前后身份检查，提供可移植的快照级保证。它不是 OMO 的 openat 祖先目录描述符链，也不对恶意父目录并发替换作同等内核级承诺；文档与代码注释不得把它说成更强。
+2. **native approvals（never）**：reviewer 子代理固定 Host 原生审批策略 `never`，不存在交互式提权通道；读取仍受 Host fs policy 约束。批准只来自协调器的双回执，不来自子代理自述、schema 通过或覆盖日志——这些至多证明形状/交付完整，不证明模型理解。
+3. **task aliases 已删除**：`task` 工具与 `metis`/`momus`/`oracle` 等 alias 在 A4 已移除；现行子代理走原生 `subagent`，评审走固定 namespaced preset。把它们写回文档会制造可执行的错误指令。
+4. **独立性不是 OS 隔离**：两个 fresh spawn 是 Host 内独立会话/上下文，不是进程或内核隔离；独立性由固定路由、不同模型、契约 hash、完整输入和 coordination 检查承担。
+
+### 10.4 旧说法清单（只作历史）
+
+- “review 只在会话内单车道” → 仅基础面/能力缺失的退回路径成立。
+- “momus+oracle 双 fresh-preset 子代理” → alias 已删除；双车道现在是固定 namespaced presets。
+- “`/ulw-review` 注入 reviewer 契约” → 发货入口改为接受 round + 回执；inline 契约仅无 router 的独立组合可达。
+- “同一模型换供应商算双模型” → 解析器按 `normalizeModelId` 拒绝；文档不得暗示可以这样凑独立。
