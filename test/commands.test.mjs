@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -16,15 +16,16 @@ import {
   registerCommands,
   resolveReviewTarget,
 } from '../lib/commands.js'
+import { buildReviewFollowup, buildReviewReceipt } from '../lib/review-tools.js'
 
 const workspace = () => mkdtempSync(join(tmpdir(), 'dsh-ulw-plan-commands-'))
 
 /** A minimal agent double that records every queued followup turn. */
-function fakeAgent(cwd) {
+function fakeAgent(cwd, sessionId = 'session-1') {
   const followups = []
   return {
     followups,
-    session: { header: { cwd } },
+    session: { id: sessionId, header: { cwd } },
     followup(message) {
       followups.push(message)
     },
@@ -52,6 +53,66 @@ function fakeCtx(mode = 'off') {
 const byName = (ctx, name) => ctx.registrations.find((definition) => definition.name === name)
 
 const invoke = (definition, rawInput, agent) => definition.handler({ rawInput, agent })
+
+/** A Handoff authority double: the only member the command gate may read. */
+function fakeHandoff(states = {}, options = {}) {
+  const calls = []
+  return {
+    calls,
+    stateForSession(sessionId) {
+      calls.push(sessionId)
+      if (options.throw === true) throw new Error('handoff state unavailable')
+      return states[sessionId] ?? null
+    },
+  }
+}
+
+/** One active execute lease as `stateForSession` reports it (leased or bound). */
+function activeLeaseState(overrides = {}) {
+  return {
+    status: 'leased',
+    required: true,
+    lease: { handoffId: 'handoff-test-1', required: true },
+    ...overrides,
+  }
+}
+
+/** A review router double that answers with the shipped accepted-round receipt. */
+function fakeRouter() {
+  const calls = []
+  return {
+    calls,
+    command(request) {
+      calls.push(request)
+      const envelope = { roundId: 'round-test-1', launchId: 'launch-test-1' }
+      return Promise.resolve({
+        result: { kind: 'success', text: buildReviewReceipt(envelope, request.target.absolute) },
+        followup: buildReviewFollowup(envelope, request.target.absolute),
+      })
+    },
+  }
+}
+
+/** A plan fixture plus one registered command surface for the lease-gate tests. */
+function reviewSetup(mode, handoff) {
+  const cwd = workspace()
+  const target = join(cwd, '.dsh', 'ulw', 'plans', 'feature.md')
+  mkdirSync(join(cwd, '.dsh', 'ulw', 'plans'), { recursive: true })
+  writeFileSync(target, '# feature plan')
+  const ctx = fakeCtx(mode)
+  if (handoff !== undefined) ctx.handoff = handoff
+  const router = fakeRouter()
+  registerCommands(ctx, { review: router })
+  const agent = fakeAgent(cwd)
+  return {
+    cwd,
+    ctx,
+    router,
+    agent,
+    digest: createHash('sha256').update(readFileSync(target)).digest('hex'),
+    invokeReview: (who = agent) => invoke(byName(ctx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', who),
+  }
+}
 
 test('registerCommands mounts all three commands and returns one disposer', () => {
   const ctx = fakeCtx()
@@ -140,24 +201,117 @@ test('ulw-review injects the reviewer contract with the literal target and diges
   assert.equal(text.includes('.omo'), false)
 })
 
-test('ulw-review refuses while executing and reports invalid targets without injecting', () => {
+test('ulw-review accepts execute mode before any lease, including the no-router fallback, and reports invalid targets without injecting', () => {
   const cwd = workspace()
+  mkdirSync(join(cwd, '.dsh', 'ulw', 'plans'), { recursive: true })
+  writeFileSync(join(cwd, '.dsh', 'ulw', 'plans', 'feature.md'), '# feature plan')
   const ctx = fakeCtx('execute')
   registerCommands(ctx)
   const agent = fakeAgent(cwd)
 
-  const refused = invoke(byName(ctx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', agent)
-  assert.equal(refused.kind, 'error')
-  assert.match(refused.text, /ulw-execute mode/)
+  const accepted = invoke(byName(ctx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', agent)
+  assert.equal(accepted.kind, 'success')
+  assert.match(accepted.text, /reviewer contract injected/)
+  assert.equal(agent.followups.length, 1)
 
-  mkdirSync(join(cwd, '.dsh', 'ulw', 'plans'), { recursive: true })
-  writeFileSync(join(cwd, '.dsh', 'ulw', 'plans', 'feature.md'), '# feature plan')
   const offline = fakeCtx('off')
   registerCommands(offline)
-  const invalid = invoke(byName(offline, ULW_REVIEW_COMMAND), 'nope.md', fakeAgent(cwd))
+  const invalidAgent = fakeAgent(cwd)
+  const invalid = invoke(byName(offline, ULW_REVIEW_COMMAND), 'nope.md', invalidAgent)
   assert.equal(invalid.kind, 'error')
   assert.match(invalid.text, /Usage: \/ulw-review|no such plan file|must live under/)
-  assert.equal(agent.followups.length, 0)
+  assert.equal(invalidAgent.followups.length, 0)
+})
+
+test('execute mode without a handoff lease accepts the round and returns the accepted receipt', async () => {
+  const handoff = fakeHandoff({})
+  const setup = reviewSetup('execute', handoff)
+  const result = await setup.invokeReview()
+
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /accepted round round-test-1/)
+  assert.match(result.text, /This receipt is NOT a completed review/)
+  assert.equal(/approved: yes|\[OKAY\]/.test(result.text), false, 'the receipt must never fabricate approval')
+  assert.deepEqual(handoff.calls, ['session-1'], 'the gate resolves the lease for the command session')
+  assert.equal(setup.router.calls.length, 1)
+  assert.equal(setup.router.calls[0].target.digest, setup.digest)
+  assert.equal(setup.agent.followups.length, 1)
+  const followup = setup.agent.followups[0].content[0].text
+  assert.match(followup, /ACCEPTED but NOT completed/)
+  assert.match(followup, /not a new user approval/)
+})
+
+test('execute mode without any handoff keeps accepting the round (old Host composition)', async () => {
+  const setup = reviewSetup('execute')
+  const result = await setup.invokeReview()
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /accepted round round-test-1/)
+  assert.equal(setup.router.calls.length, 1)
+  assert.equal(setup.agent.followups.length, 1)
+})
+
+test('execute mode with an active lease refuses with HANDOFF_ACTIVE_EXECUTE and accepts no round', async () => {
+  const handoff = fakeHandoff({ 'session-1': activeLeaseState() })
+  const setup = reviewSetup('execute', handoff)
+  const result = await setup.invokeReview()
+
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(result.text.includes('CAPABILITY_UNAVAILABLE'), false, 'the lease refusal carries its own stable code')
+  assert.equal(/accepted round|NOT a completed review/.test(result.text), false, 'a refusal never fabricates a receipt')
+  assert.equal(setup.router.calls.length, 0)
+  assert.equal(setup.agent.followups.length, 0)
+
+  // The rule covers any active execution lease (plan design line 53: only an execute
+  // that already holds a lease refuses the plan review), not only required ones.
+  const bound = reviewSetup('execute', fakeHandoff({
+    'session-1': activeLeaseState({ status: 'bound', required: false, lease: { handoffId: 'handoff-test-2', required: false } }),
+  }))
+  const boundResult = await bound.invokeReview()
+  assert.equal(boundResult.kind, 'error')
+  assert.match(boundResult.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(bound.router.calls.length, 0)
+  assert.equal(bound.agent.followups.length, 0)
+
+  // The gate is router-independent: the standalone inline path refuses identically.
+  const inlineCtx = fakeCtx('execute')
+  inlineCtx.handoff = handoff
+  registerCommands(inlineCtx)
+  const inlineAgent = fakeAgent(setup.cwd)
+  const inline = invoke(byName(inlineCtx, ULW_REVIEW_COMMAND), '.dsh/ulw/plans/feature.md', inlineAgent)
+  assert.equal(inline.kind, 'error')
+  assert.match(inline.text, /HANDOFF_ACTIVE_EXECUTE/)
+  assert.equal(inlineAgent.followups.length, 0)
+})
+
+test('an unreadable handoff state fails closed as capability, never as an accepted lease', async () => {
+  const setup = reviewSetup('execute', fakeHandoff({}, { throw: true }))
+  const result = await setup.invokeReview()
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /CAPABILITY_UNAVAILABLE/)
+  assert.equal(result.text.includes('HANDOFF_ACTIVE_EXECUTE'), false)
+  assert.equal(setup.router.calls.length, 0)
+  assert.equal(setup.agent.followups.length, 0)
+
+  // An asynchronous lookup must not fail open: a Promise is not a lease snapshot.
+  const asyncSetup = reviewSetup('execute', { stateForSession: async () => activeLeaseState() })
+  const asyncResult = await asyncSetup.invokeReview()
+  assert.equal(asyncResult.kind, 'error')
+  assert.match(asyncResult.text, /CAPABILITY_UNAVAILABLE/)
+  assert.equal(asyncSetup.router.calls.length, 0)
+  assert.equal(asyncSetup.agent.followups.length, 0)
+})
+
+test('plan and off modes still accept the round and never consult an execute lease', async () => {
+  for (const mode of ['plan', 'off']) {
+    const handoff = fakeHandoff({ 'session-1': activeLeaseState() })
+    const setup = reviewSetup(mode, handoff)
+    const result = await setup.invokeReview()
+    assert.equal(result.kind, 'success', mode)
+    assert.match(result.text, /accepted round round-test-1/)
+    assert.equal(handoff.calls.length, 0, mode + ' must not read the execute lease')
+    assert.equal(setup.agent.followups.length, 1)
+  }
 })
 
 test('ulw-consult injects the consultant contract with the request', () => {
