@@ -375,14 +375,20 @@ test('a FIFO source refuses instead of blocking the CLI', { skip: process.platfo
   assert.match(result.stderr, /regular file/)
 })
 
-test('recurrent concurrent rewrites never yield a torn hash or a hanging run', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+test('recurrent atomic replacements never yield a torn hash or a hanging run', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
   const fixture = await workspace(t, { content: VALID_PLAN })
   const other = VALID_PLAN.replace('Third task', 'Third task rewritten while linting')
   const allowed = new Set([hash(VALID_PLAN), hash(other)])
-  const writer = 'const fs=require("node:fs");const p=process.argv[1],a=process.argv[2],b=process.argv[3];for(let n=0;n<300;n+=1)fs.writeFileSync(p,n%2?a:b)'
+  // Atomic replace writer: every version is written to a complete temp file in the
+  // same directory and then renamed over the target. A reader holding one descriptor
+  // can therefore only observe a complete version, so the assertion below is a
+  // property this product can actually uphold. An in-place rewrite cannot be tested
+  // this way: a single descriptor may read a mixed stream when the rewrite lands
+  // between reads (the deterministic barrier test below covers that case).
+  const writer = 'const fs=require("node:fs");const p=process.argv[1],a=process.argv[2],b=process.argv[3],tmp=process.argv[4];for(let n=0;n<300;n+=1){fs.writeFileSync(tmp,n%2?a:b);fs.renameSync(tmp,p)}'
   for (let round = 0; round < 8; round += 1) {
     await fs.writeFile(fixture.path, round % 2 === 0 ? VALID_PLAN : other)
-    const child = spawn(process.execPath, ['-e', writer, fixture.path, VALID_PLAN, other], { stdio: 'ignore' })
+    const child = spawn(process.execPath, ['-e', writer, fixture.path, VALID_PLAN, other, join(fixture.root, 'plan.tmp')], { stdio: 'ignore' })
     const done = new Promise(resolve => child.on('exit', resolve))
     const result = run([fixture.target, '--json'], fixture.root)
     await done
@@ -390,4 +396,37 @@ test('recurrent concurrent rewrites never yield a torn hash or a hanging run', {
     if (result.status === 5) assert.match(result.stderr, /changed while reading/)
     else assert.ok(allowed.has(JSON.parse(result.stdout).sha256), 'reported hash must belong to a complete on-disk version')
   }
+})
+
+// Test-only barrier: the second fstat re-check in readSource is the freshness gate.
+// Mutating the source right before it (append one byte, so the size differs even on
+// a filesystem with coarse timestamps) makes the race deterministic with no sleeps.
+const FRESHNESS_BARRIER_HOOK = `const fs = require('node:fs')
+const original = fs.fstatSync
+let calls = 0
+let mutated = false
+fs.fstatSync = function (fd, ...rest) {
+  calls += 1
+  if (calls === 2 && !mutated) {
+    mutated = true
+    fs.appendFileSync(process.env.PLAN_LINT_BARRIER, 'X')
+  }
+  return original.call(this, fd, ...rest)
+}
+require('node:module').syncBuiltinESMExports()
+`
+
+test('a controlled in-place rewrite between read and fstat re-check is refused, never hashed', { skip: process.platform === 'win32', timeout: 15000 }, async t => {
+  const fixture = await workspace(t, { content: VALID_PLAN, files: { 'lib/plan-source.js': 'export const x = 1\n', 'docs/fidelity.md': '# fidelity\n' } })
+  const hookPath = join(fixture.root, 'freshness-barrier.cjs')
+  await fs.writeFile(hookPath, FRESHNESS_BARRIER_HOOK)
+  const result = spawnSync(process.execPath, ['--require', hookPath, CLI, fixture.target, '--json'], {
+    cwd: fixture.root,
+    env: { ...process.env, PLAN_LINT_BARRIER: fixture.path },
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 5)
+  assert.match(result.stderr, /changed while reading/)
+  assert.equal(result.stdout, '')
+  assert.equal(await fs.readFile(fixture.path, 'utf8'), VALID_PLAN + 'X')
 })

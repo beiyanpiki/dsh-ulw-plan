@@ -10,6 +10,13 @@
 // never reports a semantic verdict; a non-regular source (FIFO, directory) and a source
 // that changes while it is read are refused instead of blocking or lying.
 //
+// LIMIT: the before/after fstat identity check proves freshness only against writers
+// whose change is visible in that metadata or leaves the read window between chunks. An
+// in-place, same-size rewrite that completes entirely inside the fstat window can still
+// be observed as a mixed stream on filesystems whose timestamps are coarser than the
+// rewrite; this reader cannot distinguish that without a lock. Atomic replacement (write
+// a temp file, then rename over the target) is the supported concurrent writer.
+//
 // Zero external dependencies (node builtins only), mirroring plan-state.mjs.
 
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs'
