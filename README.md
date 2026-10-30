@@ -58,7 +58,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 | 命令 | 行为 |
 | --- | --- |
 | `/ulw-consult <请求>` | 校验请求后，把 plan-consultant 契约（`references/plan-consultant.md`）+ 请求文本作为一轮用户消息注入当前会话；`execute` 模式下拒绝 |
-| `/ulw-review <plan-path>` | 校验目标（必须是存在的 `.dsh/ulw/plans/<slug>.md`，YAML 拒绝，目录约束强制）；增强装配可用时向协调器 `require` 并接受一轮双评审，返回「已接受、未完成」的回执，再用 `wait`/`status` 取两条车道的终态；能力缺失时返回 `CAPABILITY_UNAVAILABLE` 并列出缺失服务，不注入 inline 契约；`execute` 模式下拒绝 |
+| `/ulw-review <plan-path>` | 校验目标（必须是存在的 `.dsh/ulw/plans/<slug>.md`，YAML 拒绝，目录约束强制）；增强装配可用时向协调器 `require` 并接受一轮双评审，返回「已接受、未完成」的回执，再用 `wait`/`status` 取两条车道的终态；能力缺失时返回 `CAPABILITY_UNAVAILABLE` 并列出缺失服务，不注入 inline 契约；`execute` 模式下仅在会话持有 active 执行 lease 时拒绝：未持 lease 时照常接受一轮（回执仍是「已接受、未完成」），持有 `ulw_handoff` 签发的 `leased`/`bound` lease 时才以 `HANDOFF_ACTIVE_EXECUTE` 拒绝，且拒绝发生在受理前（零轮次、零 lane 调用）；`plan`/`off` 不变 |
 
 两条命令都通过 `agent.followup` 落成普通用户轮次（与 `/goal` 同一座 Host 桥），注入内容模型可见、会话日志可持久。`/ulw-consult` 注入 consultant 契约；`/ulw-review` 在发货入口（`lib/index.js` 注入的 review router）里不再注入 reviewer 契约，而是接受一轮 Host 双评审，并通过 followup 提示会话去 `ulw_review` `wait`/`status`。只有 `lib/commands.js` 在没有 router 的独立组合里才保留旧的 inline 契约注入；安装后的插件不会走那条审批路径。
 
@@ -152,7 +152,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 2. 没有 `task` 工具：实现者派发用原生 `subagent`，`category` 只是 prompt 词汇（不选模型、不是参数）。
 3. high-accuracy 评审：基础面是 plan 工作流的会话内步骤（单车道 + 有界收敛）；增强装配可用时由 Host 双评审承担（两条车道 + 双回执 + 有界收敛），不再是 momus/oracle 双子代理。
 4. 没有 continuation hook；用 `create_goal` 承担续跑。
-5. 旧 plan-gate 的三条件简化为命令/工具校验：`/ulw-review` 校验唯一目标路径并在 `execute` 模式拒绝；`execute` 模式的产品写入由 `ulw_handoff` 的执行 lease 门禁（required 计划需先通过双评审）。
+5. 旧 plan-gate 的三条件简化为命令/工具校验：`/ulw-review` 校验唯一目标路径；`execute` 模式下仅当会话持有 active 执行 lease（`ulw_handoff` 签发的 `leased`/`bound`）时以 `HANDOFF_ACTIVE_EXECUTE` 拒绝，未持 lease 时照常接受一轮（回执只表示已接受，不是完成）；`execute` 模式的产品写入由 `ulw_handoff` 的执行 lease 门禁（required 计划需先通过双评审）。
 6. 新增 `/ulw-mode`。
 7. guard 在 **plan 模式**不管 `bash`（与 omo 的 prometheus-md-only 一致，否则 `scaffold-plan.mjs` 无法产出文件）；**execute 模式**的 `bash` 由 `ulw_handoff` 的执行 lease 门禁，未取得 lease 前拒绝。
 8. 模型用 `skill` 工具自行加载 `ulw-plan` 不会切换模式；进入 plan 模式请用 `/ulw-plan` 或 `/ulw-mode plan`。
