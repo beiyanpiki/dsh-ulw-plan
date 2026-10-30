@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { createReviewArtifact } from '../lib/review-artifact.js'
 import { CANONICAL_PLAN_SLUG_RE, ERROR_CODES, PLAN_LINT_CODES, isCanonicalPlanSlug, lintPlan, parsePlanDocument, planSlugFromPath } from '../lib/review-lint.js'
 import { parseReviewRequest } from '../lib/review-protocol.js'
 import { computeInstructionSha256 } from '../lib/review-artifact.js'
@@ -178,6 +179,43 @@ test('one canonical slug grammar: scaffold, protocol and lint reject a--b and a-
   assert.equal(cli.status, 2, cli.stderr)
   assert.match(cli.stdout, /error line 0 SLUG_NOT_CANONICAL/)
   assert.match(cli.stdout, /valid=no/)
+})
+
+test('a slug-less plan target is a structural error instead of a lintable fixture', async t => {
+  const files = { 'lib/plan-source.js': 'export const x = 1\n', 'docs/fidelity.md': '# fidelity\n' }
+  const fixture = await workspace(t, { slug: '', content: VALID_PLAN, files })
+  assert.equal(fixture.target, '.dsh/ulw/plans/.md')
+  assert.equal(planSlugFromPath(fixture.target), '')
+  assert.equal(planSlugFromPath(fixture.path), '')
+  const result = lintPlan({ content: VALID_PLAN, path: fixture.target, workspace: fixture.root })
+  assert.equal(result.valid, false)
+  const diagnostic = at(result, 'SLUG_MISSING', 0)
+  assert.ok(diagnostic, JSON.stringify(result.diagnostics))
+  assert.equal(diagnostic.severity, 'error')
+  assert.ok(ERROR_CODES.includes('SLUG_MISSING'))
+  assert.ok(PLAN_LINT_CODES.includes('SLUG_MISSING'))
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['SLUG_MISSING'])
+  assert.equal(result.sha256, hash(VALID_PLAN))
+  for (const target of [fixture.target, fixture.path]) {
+    const cli = run([target], fixture.root)
+    assert.equal(cli.status, 2, target + '\n' + cli.stderr)
+    assert.match(cli.stdout, /error line 0 SLUG_MISSING/, target)
+    assert.match(cli.stdout, /valid=no/, target)
+    assert.doesNotMatch(cli.stdout, /valid=yes/, target)
+  }
+  const json = run([fixture.target, '--json'], fixture.root)
+  assert.equal(json.status, 2)
+  assert.deepEqual(JSON.parse(json.stdout).diagnostics.map(entry => entry.code), ['SLUG_MISSING'])
+  // The other surfaces keep rejecting the same target.
+  await assert.rejects(createReviewArtifact({ workspace: fixture.root, target: fixture.target }), error => error.code === 'INVALID_SOURCE')
+  assert.throws(() => parseReviewRequest({ action: 'start', target: fixture.target }), error => error.code === 'INVALID_REQUEST')
+  const scaffold = spawnSync(process.execPath, [SCAFFOLD, ''], { cwd: fixture.root, encoding: 'utf8' })
+  assert.equal(scaffold.status, 1)
+  assert.equal(scaffold.stdout, '')
+  // Fixtures outside .dsh/ulw/plans/ are still lintable without a slug.
+  const outside = await workspace(t, { slug: null, content: VALID_PLAN, files })
+  assert.equal(planSlugFromPath(outside.target), null)
+  assert.equal(lintPlan({ content: VALID_PLAN, path: outside.target, workspace: outside.root }).valid, true)
 })
 
 test('a legal plan with new targets, evidence paths, urls, globs and fenced demos passes with exact counts', async t => {
