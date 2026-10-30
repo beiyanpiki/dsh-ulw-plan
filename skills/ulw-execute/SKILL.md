@@ -38,7 +38,8 @@ Translate any Codex-only tool name in an inherited example to its DeepSeek Harne
 
 | Codex example | DSH tool to use |
 | --- | --- |
-| final-review `task(...)` / reviewer `spawn_agent` | `/ulw-review <plan-path>` injects the reviewer contract into this conversation; or run the reviewer contract from `references/plan-reviewer.md` in the ulw-plan skill inline |
+| final-review `task(...)` / reviewer `spawn_agent` | `subagent({description, prompt})` with a fresh independent reviewer prompt for the PRODUCT diff, QA and fidelity; `/ulw-review` reviews the PLAN only and is refused in execute mode, so it is never a substitute for F2 code review |
+| execution handoff / worktree / bootstrap | `ulw_handoff` actions `check`, `bootstrap`, `bind-worktree`; parameters are selectors only (canonical target, absolute worktree path) |
 | worker `multi_agent_v1.spawn_agent({"message":"TASK: act as <role>. ..."})` | `subagent({description, prompt})` — the native tool; put the role AND the `Recommended task executor category:` tier into the prompt text (e.g. "You are a quick-tier worker: mechanical, single-file"). `subagent_fork` only when the child truly needs this session's context |
 | `multi_agent_v1.wait_agent(...)` / `background_output(task_id=…)` | not needed: the native tools notify you in-session when a child finishes; between notifications keep working or end the turn - never poll |
 | `multi_agent_v1.send_input(...)` | `send_message(agent_id, message)` |
@@ -62,6 +63,21 @@ $ulw-execute [plan-name] [--worktree <absolute-path>] [--make-pr] [--ship]
 - `--make-pr` (optional): deliver each phase's worktree as a pull request — push the branch, open a reviewer-readable PR, hand off with the URL, and merge only if the user asks.
 - `--ship` (optional): full delivery lifecycle; implies `--make-pr`. After the PR opens, stay on the job until it is MERGED: watch CI and review gates, fix failures and address feedback from the worktree (fresh QA evidence for behavior changes), merge per the repository's merge policy, then remove the worktree and sync `.dsh/ulw/` state back.
 
+## Trusted handoff (MANDATORY before any product side effect)
+
+The Host owns execution authority; a plan selection, a skill load or an "execute" mode is not a lease. Immediately after Phase 1 selects the plan, and before creating a worktree, writing product files or dispatching an implementer:
+
+1. Call `ulw_handoff({ action: "check", target: ".dsh/ulw/plans/<plan>.md" })`.
+   - Ordinary plan: an ordinary lease is returned with `nextAction: "execute"` and zero reviewer starts. Never start a review just to execute an ordinary plan.
+   - Required plan: no lease until a persisted Host dual approval matches the live raw/instruction digests, the policy and both lane receipts. `HANDOFF_NOT_APPROVED` names `review`/`start` as the next action: run the Host dual review (`ulw_review` actions `require`, `start`, `wait`) or stop. A draft OKAY, an old round receipt or a hand-written approval is never authority.
+   - Capability refusal (`HANDOFF_REVIEW_UNAVAILABLE`, `HANDOFF_POLICY_UNBOUND`, `HANDOFF_STORE_UNAVAILABLE`, `HANDOFF_CLOSED`): stop and report the code. Never work around it with direct writes, a copied lease or an unverified fallback.
+2. In a task-owned worktree, call `ulw_handoff({ action: "bind-worktree", target, worktreePath: "<absolute path>" })` after the worktree exists and before editing. A refused binding means no product writes in that worktree.
+3. No-plan bootstrap: call `ulw_handoff({ action: "bootstrap", target: ".dsh/ulw/plans/<slug>.md" })`. The Host decides the requirement from its trusted state, calls the scaffold function through the narrow interface, and returns `nextAction: "review"` or `"check"`. Do not run `scaffold-plan.mjs` through bash, hand-create the plan/draft, or pass an approval flag - the tool has no such field.
+4. Delegated workers inherit the lease from their parent through the Host. Never copy a `handoffId`, lease object or approval into a subagent prompt as a credential, and never let an undeligated child claim an ordinary lease.
+5. Every product side effect revalidates the plan instruction hash. A legal status tick `- [ ]` -> `- [x]` keeps the lease; editing task text, Scope, QA, references or the human TL;DR revokes it immediately. After a revoking edit, stop, re-run the Host review and `ulw_handoff check` before continuing.
+
+If `ulw_review` is unavailable, a required plan cannot execute; report the capability code and leave it blocked. Ordinary plans still get an ordinary lease with zero review starts. If `ulw_handoff` itself is unavailable, required execution stops; an ordinary plan may continue only under the pre-existing Host surface with the missing capability recorded in the ledger - never by fabricating a lease or writing a draft approval.
+
 ## Goal and todo discipline (MANDATORY)
 
 Do ALL of this immediately after the plan is selected, BEFORE the first implementation dispatch. Skipping any step is a defect.
@@ -79,16 +95,18 @@ Do ALL of this immediately after the plan is selected, BEFORE the first implemen
 5. If no active work exists and exactly one plan exists, select it.
 6. If no active work exists and there is no selectable plan, enter **No-plan bootstrap**.
 7. If multiple plans remain possible, ask one focused selection question.
+8. Run the trusted handoff check above immediately after selection; a refusal stops Phase 2 product work.
 
 ### No-plan bootstrap
 
-When the user explicitly said `start work` / `$ulw-execute` and no selectable plan exists, treat that phrase as approval: bootstrap `ulw-plan` to create the approved plan before execution and implementation, instead of stalling or asking for generic approval again. A brief or notes file without waves, checkboxes, and acceptance criteria is NOT decision-complete — enter this bootstrap too.
+When the user explicitly said `start work` / `$ulw-execute` and no selectable plan exists, treat that phrase as approval to bootstrap the PLAN through the Host handoff - never as approval to write product code. A brief or notes file without waves, checkboxes, and acceptance criteria is NOT decision-complete — enter this bootstrap too.
 
-1. Invoke the `ulw-plan` skill from the current request and require its dynamic adversarial workflow: collect, verify, design, adversarial plan-review, synthesize.
-2. The generated work plan must be saved under `.dsh/ulw/plans/<slug>.md` before implementation or Boulder state writes that point at plan work.
-3. Use maximum safe parallelism in the generated plan: independent files/tasks fan out; same-file writes, shared state, and named dependencies serialize.
-4. Preserve safety boundaries. Ask one focused question only when the objective is missing, destructive, or has a safety/product ambiguity that repository exploration cannot resolve.
-5. After the plan exists, continue directly to Phase 2.
+1. Choose the canonical target `.dsh/ulw/plans/<slug>.md` and call `ulw_handoff({ action: "bootstrap", target })`. The Host calls the scaffold function through the narrow interface and creates the draft/plan; it refuses with a stable code instead of guessing. Do not run `scaffold-plan.mjs` through bash, hand-create the artifacts, or pass an approval flag.
+2. Invoke the `ulw-plan` skill for the plan CONTENT (collect, verify, design, adversarial plan review, synthesize) and require its decision-complete contract. The generated work plan must pass `plan-lint.mjs` and be saved under `.dsh/ulw/plans/<slug>.md` before implementation or Boulder state writes that point at plan work.
+3. Read the bootstrap `nextAction`: `"review"` means the generated plan needs the Host dual review - run `ulw_review` actions `require`, `start`, `wait` against the completed plan and continue only on `approved: true` + `completed: true`; `"check"` means an ordinary plan - call `ulw_handoff` action `check` for the lease. A capability refusal stops required execution; never fabricate a lease.
+4. Use maximum safe parallelism in the generated plan: independent files/tasks fan out; same-file writes, shared state, and named dependencies serialize.
+5. Preserve safety boundaries. Ask one focused question only when the objective is missing, destructive, or has a safety/product ambiguity that repository exploration cannot resolve.
+6. After the plan exists and the trusted lease is obtained, continue directly to Phase 2. If `ulw_handoff` is unavailable, stop: a required plan cannot execute, and an ordinary plan may continue only under the pre-existing Host surface with the missing capability recorded in the ledger.
 
 ## Phase 2: Create or update Boulder state
 
@@ -111,7 +129,7 @@ Write `.dsh/ulw/boulder.json` before implementation starts. Prefix session ids w
 }
 ```
 
-Every phase (plan wave) runs in its own task-owned worktree with its own goal: before the wave's first dispatch, record the wave's goal — its checkboxes and their acceptance criteria — as a ledger entry, then `git worktree add <repo>-wt/<plan>-<wave> <branch off the integration base>` (or verify a `--worktree` path with `git worktree list --porcelain`), store the absolute path as `worktree_path`, run every edit, command, test, and evidence capture inside it; the wave lands on the integration base once each of its checkboxes is verified or `[~]` (direct merge, or the PR under `--make-pr`/`--ship`; a `[~]` row's unverified changes do not land: a dispatched worker reverts them in the wave worktree before landing, and the `unmet` entry records the revert), and the next wave branches from that landed base. Use the bundled ultrawork directive’s Task resources and todo rules at wave/worktree creation; read those sections if absent from context.
+Every phase (plan wave) runs in its own task-owned worktree with its own goal: before the wave's first dispatch, record the wave's goal — its checkboxes and their acceptance criteria — as a ledger entry, then `git worktree add <repo>-wt/<plan>-<wave> <branch off the integration base>` (or verify a `--worktree` path with `git worktree list --porcelain`), store the absolute path as `worktree_path`, then call `ulw_handoff({ action: "bind-worktree", target: ".dsh/ulw/plans/<plan>.md", worktreePath: "<that absolute path>" })` and require `ok: true` before running any edit, command, test, or evidence capture inside it; the wave lands on the integration base once each of its checkboxes is verified or `[~]` (direct merge, or the PR under `--make-pr`/`--ship`; a `[~]` row's unverified changes do not land: a dispatched worker reverts them in the wave worktree before landing, and the `unmet` entry records the revert), and the next wave branches from that landed base. Use the bundled ultrawork directive’s Task resources and todo rules at wave/worktree creation; read those sections if absent from context.
 
 ## Parallel delivery lanes (teams and worktrees)
 
@@ -135,7 +153,7 @@ Landing rules, regardless of topology:
 3. Ignore nested checkboxes under acceptance criteria, evidence, and definition-of-done sections.
 4. Classify the checkbox tier and record it in its ledger entry. Default is LIGHT — a narrow change inside existing layers. Take HEAVY only on a fact you can point to: a new module / abstraction / domain model; auth, security, or session; an external integration; a DB schema or migration; concurrency or transaction boundaries; a cross-domain refactor; or the plan or user signals care. When unsure, take HEAVY; upgrade and redo skipped gates the moment a HEAVY fact surfaces; never downgrade.
 5. Decompose that checkbox into atomic sub-tasks sized for ONE worker in ONE run — a sub-task that would need mid-flight steering is two sub-tasks. Collect every other unchecked checkbox in the same plan wave whose dependencies are met — their lanes execute concurrently. A wave that could split further but holds fewer than 3 independent sub-tasks is under-split.
-6. **DELEGATE EVERYTHING. YOU NEVER IMPLEMENT.** Route every sub-task through the delegation router below, then dispatch ALL independent sub-tasks across those checkboxes in one parallel worker-spawn burst (a single batched spawn call where the harness supports it); route named dependencies per the lane-topology decision above. Verification and checkbox marking stay per-checkbox.
+6. **DELEGATE EVERYTHING. YOU NEVER IMPLEMENT.** Before the burst, confirm the trusted handoff returned `nextAction: "execute"` and, in a worktree, that `bind-worktree` succeeded; a missing, refused, revoked or source-drifted lease blocks every dispatch. Route every sub-task through the delegation router below, then dispatch ALL independent sub-tasks across those checkboxes in one parallel worker-spawn burst (a single batched spawn call where the harness supports it); route named dependencies per the lane-topology decision above. Verification and checkbox marking stay per-checkbox.
 7. Give every dispatched sub-task its completion condition and watch for it per the section below. A dispatch whose completion nobody watches is an unfinished dispatch.
 
 ### Monitor every dispatched subagent to its completion condition
@@ -240,6 +258,8 @@ Only after verification passes:
 3. Append a `task-completed` ledger entry.
 4. Continue with the next checkbox. Do not ask whether to continue.
 
+A status tick is the only plan edit a required lease tolerates: `- [ ]` -> `- [x]` (or `- [~]`) keeps the instruction hash, while changing task text, Scope, QA, references or the human TL;DR revokes the lease. Never hand-write an approval, lease or receipt into the ledger; record the Host `handoffId`/`nextAction` and actionable capability codes only.
+
 ## Completion
 
 When all top-level checkboxes in `## TODOs` and `## Final Verification Wave` are complete:
@@ -248,6 +268,10 @@ When all top-level checkboxes in `## TODOs` and `## Final Verification Wave` are
 2. For PR/branch work, finish the lifecycle from the last phase's worktree: sync `.dsh/ulw/` state back to the main repo, create or update the PR, wait for review/verification gates, merge by default unless explicitly opted out, and remove the worktree only after successful merge or explicit handoff. Finish directory teardown per Task resources and record its receipts.
 3. Remove or mark the Boulder work as completed.
 4. Print an `ORCHESTRATION COMPLETE` block with the plan path, verification commands, artifacts, and cleanup receipts.
+
+### Final wave is product acceptance, not plan review
+
+F1-F4 verify the LANDED product: F1 plan compliance, F2 independent code-quality review of the diff, F3 real manual QA, F4 ideal-state fidelity. They are not another plan review. Dispatch fresh independent reviewers/workers for each, and never call `/ulw-review` or `ulw_review` to satisfy F1-F4 - plan review is closed during an active handed-off execute and is not code review. If a final-wave result requires a plan change, stop execution and leave the active execute (`/ulw-mode off`, or a new planning session), run the Host dual review on the changed plan, obtain a fresh lease, and only then continue.
 
 ## Hard rules
 
@@ -259,3 +283,8 @@ When all top-level checkboxes in `## TODOs` and `## Final Verification Wave` are
 - No implementation, review, or merge in the main checkout; every phase works in its task-owned worktree.
 - No unprefixed session ids in Boulder state. Sessions are always recorded as `codex:<session_id>`.
 - No stale-memory execution. The plan and ledger are the durable source of truth.
+- **No product side effect before trusted handoff.** `ulw_handoff` action `check` must return a lease with `nextAction: "execute"` (plus a successful `bind-worktree` in a worktree) before any product write, shell command, implementation spawn or worktree edit. A required plan without a persisted Host dual approval never executes.
+- **No hand-filled approval.** A draft OKAY, a copied receipt, a hand-written lease or an old round is never authority; only the Host's `approved: true` + `completed: true` after both lane receipts, followed by `ulw_handoff check`, authorizes required execution.
+- **No plan review as product acceptance.** F1-F4 use fresh product reviewers and real QA; `/ulw-review` or `ulw_review` review the plan only and are refused during an active execute.
+- **No overwriting or migrating old artifacts.** Never overwrite an existing draft or plan, and never migrate its OKAY into a Host approval; the scaffold's no-op is the resume contract.
+- **Bootstrap only through the narrow interface.** In execute, a no-plan bootstrap calls `ulw_handoff` action `bootstrap`; it never shells out to `scaffold-plan.mjs` or hand-creates plan artifacts.
