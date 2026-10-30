@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { CANONICAL_PLAN_SLUG_RE, ERROR_CODES, PLAN_LINT_CODES, isCanonicalPlanSlug, lintPlan, parsePlanDocument, planSlugFromPath } from '../lib/review-lint.js'
 import { parseReviewRequest } from '../lib/review-protocol.js'
+import { computeInstructionSha256 } from '../lib/review-artifact.js'
 import { parseRows } from '../skills/ulw-execute/scripts/plan-state.mjs'
 
 const CLI = fileURLToPath(new URL('../skills/ulw-plan/scripts/plan-lint.mjs', import.meta.url))
@@ -442,4 +443,102 @@ test('a controlled in-place rewrite between read and fstat re-check is refused, 
   assert.match(result.stderr, /changed while reading/)
   assert.equal(result.stdout, '')
   assert.equal(await fs.readFile(fixture.path, 'utf8'), VALID_PLAN + 'X')
+})
+
+// A minimal legal plan: two canonical sections, one task with every required slot.
+const MINIMAL_LEGAL_PLAN = [
+  '## Todos',
+  '- [ ] 1. real task',
+  '  Recommended task executor category: quick — y',
+  '  What to do / Must NOT do: z',
+  '  References: ' + code('$E/x.txt'),
+  '  Acceptance criteria: y',
+  '  QA scenarios: z',
+  '  Commit: Y | test(plan): x',
+  '## Final verification wave',
+  '',
+].join('\n')
+
+test('plan-state selection and lint task ids agree on CRLF, BOM, frontmatter and fences', () => {
+  const lf = ['# demo', '## Todos', FENCE + 'md', '- [ ] 90. fenced demo', FENCE, '- [ ] 1. real', '## Final verification wave', '- [ ] F1. audit', ''].join('\n')
+  const crlf = lf.replace(/\n/g, '\r\n')
+  const frontmatter = ['---', 'title: demo', '## Todos', '- [ ] 90. frontmatter demo', '---', '## Todos', '- [ ] 1. real', '## Final verification wave', '- [ ] F1. audit', ''].join('\n')
+  const samples = [
+    ['lf fenced demo', lf, ['1', 'F1']],
+    ['crlf fenced demo', crlf, ['1', 'F1']],
+    ['crlf frontmatter', frontmatter.replace(/\n/g, '\r\n'), ['1', 'F1']],
+    ['bom before heading', '\uFEFF' + lf, ['1', 'F1']],
+    ['bom first-line row', '\uFEFF- [ ] 1. bom row\n- [ ] 2. plain\n', ['2']],
+    ['bom mid-file row', '## Todos\n\uFEFF- [ ] 3. bom row\n- [ ] 4. real\n', ['4']],
+    ['frontmatter task section', frontmatter, ['1', 'F1']],
+    ['unclosed frontmatter opener', '---\n## Todos\n- [ ] 1. real\n', ['1']],
+  ]
+  for (const [name, content, expected] of samples) {
+    const lintIds = parsePlanDocument(content).tasks.map(entry => entry.id)
+    const stateIds = parseRows(content).map(row => row.id)
+    assert.deepEqual(stateIds, expected, name + ' plan-state')
+    assert.deepEqual(lintIds, expected, name + ' lint')
+    assert.deepEqual(stateIds, lintIds, name + ' parity')
+  }
+  const bytes = Buffer.from(crlf, 'utf8')
+  assert.deepEqual(parseRows(bytes).map(row => row.id), parsePlanDocument(bytes).tasks.map(entry => entry.id))
+})
+
+test('invalid UTF-8 is refused with the stable INVALID_UTF8 code, never silently repaired', async t => {
+  assert.equal(lintPlan({ content: MINIMAL_LEGAL_PLAN }).valid, true)
+  const invalid = Buffer.concat([Buffer.from(MINIMAL_LEGAL_PLAN, 'utf8'), Buffer.from([0xff, 0xfe, 0xfd])])
+  const result = lintPlan({ content: invalid })
+  assert.equal(result.valid, false)
+  const diagnostic = at(result, 'INVALID_UTF8', 0)
+  assert.ok(diagnostic, JSON.stringify(result.diagnostics))
+  assert.equal(diagnostic.severity, 'error')
+  assert.equal(diagnostic.taskId, '')
+  assert.ok(ERROR_CODES.includes('INVALID_UTF8'))
+  assert.ok(PLAN_LINT_CODES.includes('INVALID_UTF8'))
+  assert.equal(result.diagnostics.filter(d => d.code === 'INVALID_UTF8').length, 1)
+  assert.equal(result.sha256, hash(invalid))
+  assert.throws(() => parsePlanDocument(invalid), error => error.code === 'INVALID_UTF8')
+  assert.throws(() => computeInstructionSha256(invalid), error => error.code === 'INVALID_UTF8')
+  const fixture = await workspace(t, { content: invalid })
+  const json = run([fixture.target, '--json'], fixture.root)
+  assert.equal(json.status, 2)
+  const payload = JSON.parse(json.stdout)
+  assert.equal(payload.valid, false)
+  assert.equal(payload.sha256, hash(invalid))
+  assert.ok(payload.diagnostics.some(d => d.code === 'INVALID_UTF8'))
+  const text = run([fixture.target], fixture.root)
+  assert.equal(text.status, 2)
+  assert.match(text.stdout, /valid=no/)
+  assert.match(text.stdout, /INVALID_UTF8/)
+  assert.doesNotMatch(text.stdout, /valid=yes/)
+})
+
+test('--workspace makes the CLI verdict independent of cwd', async t => {
+  const fixture = await workspace(t, { content: VALID_PLAN, files: { 'lib/plan-source.js': 'export const x = 1\n', 'docs/fidelity.md': '# fidelity\n' } })
+  const elsewhere = await fs.mkdtemp(join(tmpdir(), 'plan-lint-cwd-'))
+  t.after(() => fs.rm(elsewhere, { recursive: true, force: true }))
+  // Default stays process.cwd(): the shipped-style plan resolves references only from
+  // the workspace root, so another cwd produces reference errors.
+  assert.equal(run([fixture.target], fixture.root).status, 0)
+  const cwdDependent = run([fixture.path], elsewhere)
+  assert.equal(cwdDependent.status, 2)
+  const explicit = run([fixture.path, '--workspace', fixture.root, '--json'], elsewhere)
+  assert.equal(explicit.status, 0)
+  const fromRoot = run([fixture.path, '--json'], fixture.root)
+  assert.equal(explicit.stdout, fromRoot.stdout)
+  assert.equal(JSON.parse(explicit.stdout).sha256, hash(VALID_PLAN))
+  assert.equal(run([fixture.path, '--workspace=' + fixture.root], elsewhere).status, 0)
+  assert.equal(run([fixture.path, '--workspace'], elsewhere).status, 5)
+  assert.equal(run([fixture.path, '--workspace', join(elsewhere, 'missing')], elsewhere).status, 5)
+  assert.equal(run([fixture.path, '--workspace', fixture.path], elsewhere).status, 5)
+})
+
+test('a FIFO source still refuses with an explicit workspace and never blocks', { skip: process.platform === 'win32', timeout: 6000 }, async t => {
+  const fixture = await workspace(t, { content: null })
+  execFileSync('mkfifo', [fixture.path])
+  const started = Date.now()
+  const result = run([fixture.target, '--workspace', fixture.root], fixture.root)
+  assert.equal(result.status, 5)
+  assert.ok(Date.now() - started < 3000)
+  assert.match(result.stderr, /regular file/)
 })

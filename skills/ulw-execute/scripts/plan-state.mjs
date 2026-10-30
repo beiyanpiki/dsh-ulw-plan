@@ -25,7 +25,7 @@
 // (2+ matching rows); 4 post-write self-check failed and the single status byte was
 // rolled back; 5 usage/IO/validation, including a plan changed by another writer.
 
-import { appendFileSync, closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -94,15 +94,39 @@ function opensHtmlComment(line) {
 	}
 }
 
+// A leading closed `---` block is plan metadata, exactly like review-lint: it never
+// opens a task section and its rows are never executable. An unterminated opener is
+// ordinary content (review-lint makes the same choice). Returns the 1-based last
+// metadata line, or 0 when the document has no frontmatter.
+function frontmatterLineLimit(buffer) {
+	const firstEnd = buffer.indexOf(10, 0);
+	const firstRaw = buffer.subarray(0, firstEnd === -1 ? buffer.length : firstEnd).toString("utf8");
+	const first = firstRaw.replace(/\uFEFF/, "").replace(/\r$/, "").trim();
+	if (first !== "---") return 0;
+	let line = 1;
+	let start = firstEnd === -1 ? -1 : firstEnd + 1;
+	while (start !== -1 && start < buffer.length) {
+		const end = buffer.indexOf(10, start);
+		const raw = buffer.subarray(start, end === -1 ? buffer.length : end).toString("utf8").replace(/\r$/, "");
+		line += 1;
+		if (raw.trim() === "---") return line;
+		start = end === -1 ? -1 : end + 1;
+	}
+	return 0;
+}
+
 // Scan the file as bytes. A row must be a column-zero checklist line; fenced code
 // blocks (including info strings and unclosed/nested fences), HTML comments, block
 // quotes, indented code, and nested lists never contribute rows. Headings only count
 // outside those constructs. When the document declares H2 sections, only rows inside
 // the canonical task sections are executable; flat plans without H2 headings keep the
-// historical whole-file row scan. The status byte is always at lineStart + 3 because
-// the prefix is ASCII.
+// historical whole-file row scan. CRLF is a line terminator: classification strips
+// exactly one trailing CR from the decoded line, while every original byte and every
+// offset (including the status byte) is preserved. The status byte is always at
+// lineStart + 3 because the prefix is ASCII.
 function scanDocument(buffer) {
 	const rows = [];
+	const frontEnd = frontmatterLineLimit(buffer);
 	let hasH2 = false;
 	let inTaskSection = false;
 	let fence = null;
@@ -116,9 +140,13 @@ function scanDocument(buffer) {
 		// A UTF-8 BOM is metadata, not content: ignore it when classifying the first
 		// line, but keep its three bytes in every row offset.
 		const bom = lineStart === 0 && raw.charCodeAt(0) === 0xfeff ? 3 : 0;
-		const text = bom === 0 ? raw : raw.slice(1);
+		const withoutBom = bom === 0 ? raw : raw.slice(1);
+		const text = withoutBom.endsWith("\r") ? withoutBom.slice(0, -1) : withoutBom;
 		let structural = false;
-		if (fence !== null) {
+		if (line <= frontEnd) {
+			// Frontmatter attaches no meaning to headings, fences, comments or rows.
+			structural = true;
+		} else if (fence !== null) {
 			if (fenceClosing(text, fence)) fence = null;
 			structural = true;
 		} else if (comment) {
@@ -140,10 +168,12 @@ function scanDocument(buffer) {
 				if (heading.level <= 2) {
 					inTaskSection = heading.level === 2 && TASK_SECTION_TITLES.has(heading.title.toLowerCase());
 				}
-			} else {
+			} else if (bom === 0) {
+				// A BOM prefixed to a row is never executable: review-lint refuses the
+				// same bytes as TASK_ROW_BOM, so both parsers select the same task set.
 				const match = ROW_RE.exec(text);
 				if (match) {
-					rows.push({ id: match[2], status: match[1], line, offset: lineStart + bom + 3, task: inTaskSection });
+					rows.push({ id: match[2], status: match[1], line, offset: lineStart + 3, task: inTaskSection });
 				}
 			}
 		}
@@ -298,13 +328,31 @@ export function validateLedgerEntry(input) {
 	return entry;
 }
 
+// Read one regular file through one descriptor. A FIFO, socket or directory is never a
+// plan and reading it would block, so it is refused up front with the existing exit-5
+// validation contract instead of hanging. dev/ino/mode come from the same descriptor
+// the bytes came from, so the tick snapshot stays consistent.
 function readPlan(planPath) {
+	let fd;
 	try {
-		const stat = statSync(planPath);
-		const content = readFileSync(planPath);
-		return { bytes: content.length, mode: stat.mode & 0o7777, content, dev: stat.dev, ino: stat.ino };
+		fd = openSync(planPath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
 	} catch (err) {
 		throw new PlanStateError(`cannot read plan ${planPath}: ${err instanceof Error ? err.message : String(err)}`, 5);
+	}
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile()) throw new PlanStateError(`not a regular file: ${planPath}`, 5);
+		const content = readFileSync(fd);
+		return { bytes: content.length, mode: stat.mode & 0o7777, content, dev: stat.dev, ino: stat.ino };
+	} catch (err) {
+		if (err instanceof PlanStateError) throw err;
+		throw new PlanStateError(`cannot read plan ${planPath}: ${err instanceof Error ? err.message : String(err)}`, 5);
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			// The descriptor was already closed.
+		}
 	}
 }
 
