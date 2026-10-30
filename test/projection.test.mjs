@@ -94,3 +94,21 @@ test('persisted garbage seeds off instead of throwing', () => {
   assert.deepEqual(ulwModeProjection.stateSchema.parse({ mode: 'bogus' }), { mode: 'off' })
   assert.deepEqual(ulwModeProjection.stateSchema.parse({ mode: 'execute' }), { mode: 'execute' })
 })
+
+test('only the human /ulw-mode command leaves the workflow off', () => {
+  const execute = ulwModeProjection.apply({ mode: 'plan' }, event('user/message', {
+    source: { kind: 'skill-invocation', name: 'ulw-execute', form: 'instructions' },
+  }))
+  assert.deepEqual(execute, { mode: 'execute' })
+  // A model skill load, a tool event or an ordinary user message can record a
+  // workflow intent but can never forge the human off escape hatch.
+  for (const candidate of [
+    event('user/message', { source: { kind: 'skill-invocation', name: 'ulw-plan', form: 'instructions' } }),
+    event('tool/result', { name: 'skill', content: 'ulw-mode off' }),
+    event('turn/start', { turn: 2 }),
+    event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'ulw-mode off' }] }),
+  ]) {
+    assert.notDeepEqual(ulwModeProjection.apply(execute, candidate), { mode: 'off' })
+  }
+  assert.deepEqual(ulwModeProjection.apply(execute, event('command/run', { name: 'ulw-mode', args: 'off' })), { mode: 'off' })
+})
