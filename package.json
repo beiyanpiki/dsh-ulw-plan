@@ -1,7 +1,7 @@
 {
   "name": "dsh-ulw-plan",
   "version": "0.1.0",
-  "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, in-conversation consultant/reviewer commands, native subagent research delegation, and a plan-mode write guard.",
+  "description": "omo (oh-my-openagent) explore -> plan -> execute workflow for DeepSeek Harness: planning skills, in-conversation consultant commands, an opt-in Host-owned dual plan review with a required-review execution handoff gate, native subagent research delegation, and a plan-mode write guard.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -16,7 +16,11 @@
     "planning",
     "workflow",
     "command",
-    "subagent"
+    "subagent",
+    "review",
+    "dual-review",
+    "plan-review",
+    "handoff"
   ],
   "author": "beiyanpiki",
   "license": "MIT",
@@ -40,7 +44,8 @@
     "lib/",
     "skills/",
     "locale/",
-    "docs/",
+    "docs/fidelity.md",
+    "docs/publishing.md",
     "cordis.patch.yml",
     "icon.svg",
     "README.md",

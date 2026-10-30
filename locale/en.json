@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "omo Workflow",
-    "description": "Explore-first planning and plan-driven execution for DSH: /ulw-plan, /ulw-execute, in-conversation consultant and reviewer commands (/ulw-consult, /ulw-review), native subagent research delegation, and a plan-mode write guard."
+    "description": "Explore-first planning and plan-driven execution for DSH: /ulw-plan, /ulw-execute, in-conversation /ulw-consult, an opt-in Host-owned dual plan review (ulw_review, /ulw-review) with API-based capability detection, the required-review execution handoff gate (ulw_handoff), native subagent research delegation, and a plan-mode write guard."
   }
 }

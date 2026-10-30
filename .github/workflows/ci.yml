@@ -11,6 +11,26 @@ permissions:
 
 jobs:
   test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Unit tests
+        run: node --test
+
+  packaging:
+    name: packaging
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,17 +41,30 @@ jobs:
         with:
           node-version: 24
 
-      - name: Unit tests
-        run: node --test
-
       - name: Syntax checks
         run: |
-          for file in lib/*.js skills/*/scripts/*.mjs; do
+          # Every runtime module and every shipped or test script, including the
+          # plan-lint CLI, plan-state CLI, QA runner and the new packaging test.
+          for file in lib/*.js skills/*/scripts/*.mjs qa/*.mjs test/*.test.mjs; do
             node --check "$file"
           done
 
       - name: Artifact-root rename gate
-        run: test "$(grep -rn '\.omo' skills prompts | wc -l)" -eq 0
+        run: |
+          # prompts/ was deleted in the DSH-native refactor. The old gate grepped
+          # a missing path, so grep failed while `wc -l` still printed 0 and the
+          # gate passed without checking anything. Fail loudly on both mistakes.
+          if [ -e prompts ]; then
+            echo "prompts/ must not exist; role contracts live under skills/ulw-plan/references/" >&2
+            exit 1
+          fi
+          if grep -rn '\.omo' skills; then
+            echo "skills/ must not reference the old artifact root .omo" >&2
+            exit 1
+          fi
+
+      - name: Package contract
+        run: node --test test/review-package.test.mjs
 
       - name: Package contents
         run: npm pack --dry-run

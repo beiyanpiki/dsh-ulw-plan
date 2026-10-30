@@ -1,10 +1,15 @@
 # dsh-ulw-plan bundle patch: one Host row over the profile.
 #
-# The row loads the package's main entry as a plain Cordis plugin. Everything
-# the plugin contributes (projection, guard, the three /ulw-* commands,
-# skills) is registered on the Host plane from `lib/index.js`; research and
-# worker delegation ride the Host's own subagent tools, so no presets and no
-# per-session composition are needed.
+# The row loads the package's main entry (lib/index.js) as a plain Cordis
+# plugin. The root contribution always registers: the ulwMode projection, the
+# plan-mode write guard, /ulw-mode, /ulw-consult and the two user-invocable
+# skills. The enhanced review face is assembled separately: ulw_review, the
+# /ulw-review round router and ulw_handoff appear only when the Host exposes
+# subagents, agentPresets, llm and storage. That face is off by default and
+# needs an explicit `review` config with two distinct routes and a positive
+# even callBudget (see README); missing services answer CAPABILITY_UNAVAILABLE
+# instead of approving. Research and worker delegation ride the Host's own
+# subagent tools, so no presets and no per-session composition are needed here.
 - insert:
     - id: omo
       name: dsh-ulw-plan
