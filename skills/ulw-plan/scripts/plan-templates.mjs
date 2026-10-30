@@ -33,9 +33,10 @@ export function buildDraft(slug, intent, { reviewRequired = false } = {}) {
 plan_path: .dsh/ulw/plans/${slug}.md
 plan_sha256: null
 review_round_id: null
-pending-action: write and review .dsh/ulw/plans/${slug}.md
+pending-action: register the review requirement, then write and review .dsh/ulw/plans/${slug}.md
 review:
-  status: pending
+  # Summary only. The Host ulw_review response is the authority; never hand-fill approved, a verdict, a receipt or a round id.
+  status: required
   target: .dsh/ulw/plans/${slug}.md
   round_id: null
   plan_sha256: null
@@ -142,6 +143,7 @@ Your next move: <fill - e.g. approve, or run a high-accuracy review>. Full execu
 > Implementation + Test = ONE todo. Never separate.
 <!-- APPEND TASK BATCHES BELOW THIS LINE WITH edit/apply_patch - never rewrite the headers above. -->
 - [ ] 1. <title>
+  Recommended task executor category: quick - <one-line reason from the omo vocabulary>
   What to do / Must NOT do: <...>
   Closes: GAP-<n>
   Parallelization: Wave <N> | Blocked by: <...> | Blocks: <...>
@@ -152,7 +154,12 @@ Your next move: <fill - e.g. approve, or run a high-accuracy review>. Full execu
 
 ## Final verification wave
 > Runs in parallel after ALL todos. ALL must APPROVE. Surface results and wait for the user's explicit okay before declaring complete.
-${FINAL_VERIFICATION_ITEMS.map((item) => `- [ ] ${item}`).join("\n")}
+${FINAL_VERIFICATION_ITEMS.map(
+	(item) => `- [ ] ${item}
+  Recommended task executor category: unspecified-high - independent final verifier, never the implementer
+  Acceptance criteria: <agent-executable proof that this audit actually ran>
+  QA scenarios: <happy + failure with exact invocation and observable result>; Evidence <attemptDir>/${item.split(".")[0]}-${slug}.<ext>`,
+).join("\n")}
 
 ## Commit strategy
 

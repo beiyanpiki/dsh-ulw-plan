@@ -10,7 +10,7 @@ metadata:
 Read this when INTENT ROUTING resolved to CLEAR: the user knows the desired outcome and the only open items are preferences/tradeoffs the repo cannot answer. Also entered from the on-the-fence tie-break (ask exactly one question).
 
 <stance>
-The user owns the outcome; genuine forks exist that only they can decide. Research first to ground, THEN ask the surviving forks. You are a peer asking only what you genuinely cannot resolve - not an interrogator gathering a feature list. High-accuracy review is optional only when `review_required` is false; if the user already asked for high accuracy, run the review after approval instead of offering it.
+The user owns the outcome; genuine forks exist that only they can decide. Research first to ground, THEN ask the surviving forks. You are a peer asking only what you genuinely cannot resolve - not an interrogator gathering a feature list. High-accuracy review is optional only when `review_required` is false; if the user already asked for high accuracy, register the requirement with `ulw_review` action `require` and run the Host dual review after approval instead of offering it. If the enhanced review service is unavailable, a required plan cannot be handed off.
 </stance>
 
 <research_protocol>
@@ -30,7 +30,7 @@ CLEARANCE CHECK after each turn: affected user named, ideal-state and gap rows r
 </interview>
 
 <approval_and_deliver>
-Run the durable approval gate (mechanics in `full-workflow.md`): present the brief once with findings (paths), the approach, and EVERY surviving owner-decision as an explicit question with your recommended option (a skipped one resolves to that default); then wait for the user's explicit okay. If "start now, or review first?" would be your ONLY question, you have defaulted forks you should have surfaced - list them first. After approval: scaffold the files, run the mandatory consultant pass, APPEND the todos, fill the human TL;DR last. Then either run the in-conversation high-accuracy review step if `review_required: true`, or present the handoff explanation (full-workflow.md Phase 4 format) and ask ONE question - start work now, or run the high-accuracy review first (the user can also run `/ulw-review <plan>` directly)? Never pick for the user when review was not requested; never begin execution.
+Run the durable approval gate (mechanics in `full-workflow.md`): present the brief once with findings (paths), the approach, and EVERY surviving owner-decision as an explicit question with your recommended option (a skipped one resolves to that default); then wait for the user's explicit okay. If "start now, or review first?" would be your ONLY question, you have defaulted forks you should have surfaced - list them first. After approval: scaffold the files, run the mandatory consultant pass, APPEND the todos, fill the human TL;DR last. With `review_required: true`, run the Host dual review: register with `ulw_review` action `require` at the draft stage, run the plan-lint preflight, then `start` and `wait` for both lane results; only the Host's `approved: true` + `completed: true` is approval, and a draft summary or an old OKAY is never substituted. Without a required review, present the handoff explanation (full-workflow.md Phase 4 format) and ask ONE question - start work now, or run the high-accuracy review first (the user can also run `/ulw-review <plan>` directly)? Never pick for the user when review was not requested; never begin execution.
 </approval_and_deliver>
 
 <worked_example>
@@ -40,5 +40,5 @@ Request: "add a 5/min-per-IP rate-limit to `/login`".
 3. One fork the ideal state settles, recorded not asked: storage backend = Redis (one count across nodes; in-memory would reset per node). One surviving owner-decision, asked WITH WHY:
    - Over-limit response (default = 429 + Retry-After; options 429 / 423 / silent drop) - why: a client contract the user lives with.
    - Swept axes: no budget/audience fork (internal service); scale bound = existing Redis capacity (defaulted, reversible).
-4. Approval brief -> explicit okay -> scaffold -> append todos -> if `review_required`, run the review step and deliver the round receipts; otherwise deliver with the optional review question.
+4. Approval brief -> explicit okay -> scaffold -> append todos -> if `review_required`, run the Host dual review (require at draft, plan-lint, start, wait) and deliver only after both lanes and `approved: true` + `completed: true`; otherwise deliver with the optional review question (the user may run `/ulw-review`).
 </worked_example>
