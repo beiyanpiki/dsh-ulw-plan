@@ -2,6 +2,8 @@
 
 这份文档把「本地可用的插件」变成「别人可以 `dsh plugin add` 的插件」。插件本身是 **零依赖、零构建** 的 ESM bundle：没有 `dependencies`、没有 `postinstall`、没有编译步骤，所以发布和安装只涉及 npm 包与 DSH 的 bundle 声明。
 
+> 本文描述的是**现行**打包面：43 个文件（第 2 节逐项列出）。包名是 `dsh-ulw-plan`，bundle row id 仍是 `omo`；项目更早的名字 `dsh-omo` 只出现在历史记录里，现行命令以本文与 README 为准。
+
 ## 0. 结论先说
 
 本仓库用 GitHub Actions 在 **版本 tag** 上把包 **stage 到 npm**；因为 npm 账号启用了 2FA，最后由维护者用 2FA 批准上线（npm 的 staged publishing）：
@@ -36,8 +38,16 @@ plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": tr
 | 声明 | 位置 | 作用 |
 | --- | --- | --- |
 | `dsh.bundle.patch` | `package.json` → `./cordis.patch.yml` | DSH 据此识别「这是一个 bundle」并合并它的 Host 行 |
-| `engines.dsh` | `package.json` → `>=0.2.0-rc.2` | 安装时做兼容性检查（不满足会拒绝激活） |
-| 运行文件白名单 | `package.json` → `files` | 保证 `lib/ skills/ locale/ cordis.patch.yml icon.svg LICENSE docs/` 都进 tarball |
+| `engines.dsh` | `package.json` → `>=0.2.0-rc.2` | 安装时的**基础面**兼容性下限；增强评审面另按 API 检测（见 0.1） |
+| 运行文件白名单 | `package.json` → `files` | 保证 `lib/ skills/ locale/ docs/fidelity.md docs/publishing.md cordis.patch.yml icon.svg README.md LICENSE` 进 tarball；逐文件清单见第 2 节 |
+
+### 0.1 分发版行为边界（与 README、`docs/fidelity.md` 一致）
+
+- **基础面装包即用**：`/ulw-plan`、`/ulw-execute`、`/ulw-consult`、`/ulw-mode`、规划期写入门禁，以及 `/ulw-review` 的目标校验。研究委托与实现者派发走 Host 原生 `subagent` / `subagent_fork`（包内没有额外的内联子代理工具）。
+- **增强评审默认关闭**：Host 双车道计划评审与 `ulw_review` / `ulw_handoff` 只在用户显式写 `review` 配置后才有授权；不写（或 `enabled: false`）就是安全默认，零模型调用、不产生 requirement，入口以 `CAPABILITY_UNAVAILABLE` 拒绝，且**不会**退回 inline 审批。
+- **已验证版本是 DSH 0.2.1-rc.4**（本机安装）。`engines.dsh` 的 `>=0.2.0-rc.2` 只是基础面下限，该版本早于这组增强 API，本文不声称旧下限已经具备它们；未装配增强服务的 Host 上，增强入口给诊断，不谎报评审完成。
+- **公开 GUI 的模型 allowlist 不是评审服务的配置**：它只约束那个 GUI 面的工具选择，既不授权评审路由，也不会被插件读取来扩大路由。授权只来自 profile 里显式的 `review` 块（示例与解析规则见 README「配置：默认关闭，显式授权」）。
+- **profile 归属**：安装器（`plugin_manager` / `dsh plugin add`）负责 profile 的依赖条目与 `dsh.profile.bundles`，不要手工维护这两处，也不要在 profile 目录里跑 `pnpm`；profile 的 `cordis.patch.yml` 是受支持的**用户覆盖层**，用它按 row id（`omo`）覆盖插件配置。
 
 ## 1. DSH 如何找到并安装一个插件
 
@@ -54,7 +64,7 @@ pnpm add <spec>
 3. 把 `cordis.patch.yml` 的 `insert` 行合并进 profile 组合；
 4. 把包名写入 `dsh.profile.bundles` 并尝试热加载。
 
-因此 `<spec>` 可以是：
+第 3、4 步的落盘由安装器负责；升级、删除也走同一个入口，见第 5 节。因此 `<spec>` 可以是：
 
 - npm 包名或版本：`dsh-ulw-plan`、`dsh-ulw-plan@0.1.0`、`@scope/dsh-ulw-plan`
 - 本机 tarball：`/path/to/dsh-ulw-plan-0.1.0.tgz`
@@ -66,31 +76,63 @@ pnpm add <spec>
 ```bash
 cd dsh-ulw-plan
 
-node --test                                   # 41 pass
-node --check lib/*.js skills/ulw-plan/scripts/*.mjs
+node --test                                   # 全绿（写稿时 466 项通过，数字随实现推进增长）
+for file in lib/*.js skills/*/scripts/*.mjs qa/*.mjs test/*.test.mjs; do node --check "$file"; done
 grep -rn '\.omo' skills | wc -l              # 0
 
-npm pack --dry-run                            # 检查实际 tarball 文件列表
-npm view dsh-ulw-plan version                      # 404 = 名字可用（2026-10-23 实测可用）
+npm pack --dry-run --json                     # 检查实际 tarball 文件列表
+npm view dsh-ulw-plan version                 # 404 = 名字可用（2026-10-23 实测可用）
 ```
 
-`npm pack --dry-run` 至少应包含：
+`npm pack --dry-run --json` 的 `files` 数组应**恰好是**下面 43 项（顺序与 npm 输出一致，写稿时实测）：
 
 ```text
-package.json
+LICENSE
+README.md
 cordis.patch.yml
+docs/fidelity.md
+docs/publishing.md
 icon.svg
+lib/commands.js
+lib/guard.js
+lib/index.js
+lib/load.js
+lib/paths.js
+lib/projection.js
+lib/review-artifact.js
+lib/review-config.js
+lib/review-coordinator.js
+lib/review-handoff.js
+lib/review-input.js
+lib/review-lint.js
+lib/review-policy.js
+lib/review-presets.js
+lib/review-protocol.js
+lib/review-state.js
+lib/review-store.js
+lib/review-tools.js
+lib/review-transport.js
+lib/skills.js
 locale/en.json
 locale/zh.json
-lib/*.js
-skills/ulw-plan/**
-skills/ulw-execute/**
-README.md
-LICENSE
-docs/**
+package.json
+skills/ulw-execute/scripts/plan-state.mjs
+skills/ulw-execute/SKILL.md
+skills/ulw-plan/references/dsh-harness.md
+skills/ulw-plan/references/full-workflow.md
+skills/ulw-plan/references/intent-clear.md
+skills/ulw-plan/references/intent-unclear.md
+skills/ulw-plan/references/plan-adversarial-reviewer.md
+skills/ulw-plan/references/plan-consultant.md
+skills/ulw-plan/references/plan-reviewer.md
+skills/ulw-plan/references/research-lanes.md
+skills/ulw-plan/scripts/plan-lint.mjs
+skills/ulw-plan/scripts/plan-templates.mjs
+skills/ulw-plan/scripts/scaffold-plan.mjs
+skills/ulw-plan/SKILL.md
 ```
 
-不要出现 `test/`、`.dsh/`、`.vendor/`、`node_modules/` 或 `*.tgz`。
+不要出现 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md` 或 `*.tgz`。`docs/migration-plan.md` 是内部迁移记录（含本机绝对路径），`files` 只放行 `docs/fidelity.md` 与 `docs/publishing.md` 两份文档。`test/review-package.test.mjs` 会把同一份清单（以及“不含私有路径/凭据”的断言）当作包契约反复校验。
 
 ### 显示元数据
 
@@ -164,7 +206,7 @@ gh workflow run release.yml --repo beiyanpiki/dsh-ulw-plan
 **想要完全自动发布**（无人工批准）有两种升级路径：
 
 1. 创建一个 **granular access token，勾选 “Bypass two-factor authentication (2FA)”**，把 `NPM_TOKEN` 换成它，并把 workflow 的 `npm stage publish` 改回 `npm publish --access public --provenance`。
-2. 更推荐：包第一次上线后，在 npmjs.com → 包 → Settings → **Trusted publishing** 添加 GitHub 发布者（repo `beiyanpiki/dsh-ulw-plan`，workflow `release.yml`，允许 direct publish），然后删除 `NPM_TOKEN` secret，把 workflow 改回 `npm publish`；npm CLI 会自动使用 GitHub OIDC，不再需要长期 token。
+2. 更推荐：包第一次上线后，在 npmjs.com → 包 → Settings → **Trusted publishing** 添加 GitHub 发布者（repo `beiyanpiki/dsh-ulw-plan`，workflow `release.yml`，允许 direct publish），然后删除 `NPM_TOKEN` 凭据，把 workflow 改回 `npm publish`；npm CLI 会自动使用 GitHub OIDC，不再需要长期 token。
 
 ### 3.2 手动发布（备用）
 
@@ -186,7 +228,7 @@ npm view dsh-ulw-plan version
       name: dsh-ulw-plan
 ```
 
-4. 重新 `npm publish`，并同时更新 `.github/workflows/release.yml` 不需要改（它发布 package.json 的名字）。
+4. 重新 `npm publish`；`.github/workflows/release.yml` 不需要改（它发布 `package.json` 里的名字）。
 
 ## 4. 用打包产物做一次真实安装验证
 
@@ -205,7 +247,7 @@ plugin_manager { "action": "install_bundle", "target": "/绝对路径/dsh-ulw-pl
 plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": true }
 ```
 
-方案 A 只验证包解析与 bundle 声明；要验证真实行为（`/ulw-plan`、`task`、guard）仍需在带 Web 的 profile 里装一次，再按 README 的「安装后手工检查清单」跑一遍。
+方案 A 只验证包解析与 bundle 声明；要验证真实行为（`/ulw-plan`、`/ulw-execute`、规划期 guard、`ulw_handoff` 的 lease、`ulw_review` 的双车道）仍需在带 Web 的 profile 里装一次，再按 README 的「安装后手工检查清单」跑一遍。
 
 ## 5. 升级已有安装
 
@@ -227,7 +269,7 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 2. 在 <https://github.com/awesome-dsh-plugin/awesome-dsh-plugin> 提交一个 PR，在 `## Workflow & Automation` 分类下加一行，格式是：
 
 ```markdown
-- [<owner>/dsh-ulw-plan](https://github.com/<owner>/dsh-ulw-plan) - 一句话说明：omo 的 explore → plan → execute 工作流，含 /ulw-plan、/ulw-execute、四个只读助手、内联 task 与规划期写入门禁。
+- [<owner>/dsh-ulw-plan](https://github.com/<owner>/dsh-ulw-plan) - 一句话说明：omo 的 explore → plan → execute 工作流，含 /ulw-plan、/ulw-execute、两条角色命令、原生子代理研究委托、Host 双车道计划评审与执行 lease 门禁（增强面默认关闭）。
 ```
 
 3. 维护者可要求 `dsh plugin add` 真实可复现、描述与行为一致、分类正确；合并后 dsh-market 和 `dsh-plugin-catalog/index.json` 会自动收录。
@@ -258,29 +300,30 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 
 - `repository` / `homepage` / `bugs` → <https://github.com/beiyanpiki/dsh-ulw-plan>
 - `author` → `beiyanpiki`；`LICENSE` → `dsh-ulw-plan contributors`
-- `.github/workflows/ci.yml`：push / PR 跑单元测试、语法检查、改名门禁与 `npm pack --dry-run`
-- `.github/workflows/release.yml`：tag `v*` 把版本 stage 到 npm（2FA 批准后上线）
+- `.github/workflows/ci.yml`：push / PR 在 Node 22 / 24 / 26 上跑 `node --test`；独立的 packaging job（Node 24）跑语法检查、产物根改名门禁、`test/review-package.test.mjs` 与 `npm pack --dry-run`
+- `.github/workflows/release.yml`：tag `v*` 校验 tag 与版本一致后，把版本 stage 到 npm（2FA 批准后上线）
 
 仍需你决定：
 
 - **每次发布的人工批准**（staged publishing 的 2FA）。如果想完全自动，按第 3.1 节升级为 bypass token 或 Trusted Publisher。
 - 如需改作者署名或许可证持有人，在 `package.json` 与 `LICENSE` 同步修改。
 
-## 10. 已验证的打包结果（2026-10-23）
+## 10. 已验证的打包结果（2026-10-30）
 
-在改名为 `dsh-ulw-plan` 之后重跑了一次完整的打包/安装演练：
+按现行 `files` 白名单重跑了一次打包演练；逐项清单见第 2 节，`test/review-package.test.mjs` 对同一份清单做机械断言。
 
-- `npm pack` → `dsh-ulw-plan-0.1.0.tgz`：**32 个文件**，约 86.5 kB packed / 228.8 kB unpacked；包含 `package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`lib/`、`prompts/`、`skills/`、`docs/`、`README.md`、`LICENSE`，不含 `test/`、`.dsh/`、`.vendor/`、`node_modules/`。
-- 临时项目 `pnpm add ../../dsh-ulw-plan-0.1.0.tgz` 后：`import('dsh-ulw-plan')` 得到 `apply` / `inject` / `name`（`name` 为 `dsh-ulw-plan`）；`import.meta.resolve('dsh-ulw-plan/icon')` 解析到包内 `icon.svg`；`dsh-ulw-plan/locale/en.json` 与 `zh.json` 正常解析出 `omo Workflow` / `omo 工作流`。
-- 新建 `distweb` profile（`dsh --profile distweb --from-default-profile web`）后：
-  `dsh plugin --profile distweb add ./dsh-ulw-plan-0.1.0.tgz`
-  → profile 依赖变成 `"dsh-ulw-plan": "file:…/dsh-ulw-plan-0.1.0.tgz"`，`dsh.profile.bundles` 自动追加 `dsh-ulw-plan`，`dsh --profile distweb --dump-config` 出现：
+- `npm pack --dry-run --json` → **43 个文件**：`package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`lib/` 的 20 个模块、`skills/ulw-plan/**` 的 12 个文件、`skills/ulw-execute/**` 的 2 个文件、`docs/fidelity.md`、`docs/publishing.md`、`README.md`、`LICENSE`；不含 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md`。
+- 把这 43 个文件原样复制到一个隔离目录后：`import` 包入口得到 `apply` / `inject` / `name`（`name` 为 `dsh-ulw-plan`）；`loadSkill('ulw-plan')` 读出含 `ULW-PLAN MODE ENABLED!` 的技能正文；`icon.svg` 与 `locale/{en,zh}.json`（`omo Workflow` / `omo 工作流`）都能从包内读出；两份 reviewer 契约（`plan-reviewer.md`、`plan-adversarial-reviewer.md`）也随包发出。
+- 更早的一次 distweb 临时 profile 演练（2026-10-23，改名之后）记录如下，只证明包解析与 bundle 声明：`dsh plugin --profile distweb add ./dsh-ulw-plan-0.1.0.tgz` 后 profile 依赖变成 `"dsh-ulw-plan": "file:…/dsh-ulw-plan-0.1.0.tgz"`，`dsh.profile.bundles` 自动追加 `dsh-ulw-plan`，`dsh --profile distweb --dump-config` 出现：
+
   ```yaml
   # == dsh-ulw-plan
   - id: omo
     name: dsh-ulw-plan
   ```
-- 本机 web profile 也已从旧的 `dsh-omo` link 切换到 `dsh-ulw-plan`: link，`dump-config` 同样出现上面的行。
-- 该 distweb profile 只用于安装演练，未启动服务；真实行为（`/ulw-plan`、`task`、guard、preset）的证据在主仓库 web profile 的 `.dsh/ulw/evidence/` 中。
+
+- 该演练 profile 只用于安装验证，未启动服务；真实行为（技能、guard、评审、handoff）的证据在 workspace 的 `.dsh/ulw/evidence/` 中。
+
+> 历史：项目更早的一次演练记录用的是旧包名 `dsh-omo` 与旧评审面，只作对照，不要据此复现；现行清单与命令以上文和 README 为准。
 
 复现这条演练不需要 npm 账号；`npm publish` 才需要 `NPM_TOKEN` / `npm login`。
