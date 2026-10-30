@@ -1484,6 +1484,87 @@ test('the shipped entry assembles ulw_handoff and an execute lease guard that re
   t.diagnostic('entry handoff: registered=3 preLeaseWrite=HANDOFF_LEASE_MISSING preLeaseBash=HANDOFF_LEASE_MISSING requiredLease=yes postLeaseWrite=allowed postLeaseBash=allowed')
 })
 
+test('native SubagentResult wrappers approve a dual round and unlock the required handoff lease', async t => {
+  const world = await createWorld(t)
+  let summary = null
+  try {
+    const { round } = await requireAndStart(world)
+    await finishRound(world)
+    const wrapper = structured => ({ output: [{ type: 'text', text: 'OKAY approved' }], stopReason: 'completed', structured })
+    world.subagents.resolve('practical', wrapper(okay(round, 'practical')))
+    world.subagents.resolve('adversarial', wrapper(okay(round, 'adversarial')))
+    const waited = await world.wait()
+    assert.equal(waited.ok, true, JSON.stringify(waited.diagnostics))
+    assert.equal(waited.state, 'approved')
+    assert.equal(waited.approved, true)
+    assert.equal(waited.approval.reasons.length, 0)
+    const approved = approvedRoundOf(waited)
+    for (const lane of REVIEW_LANES) {
+      assert.equal(approved.lanes[lane].status, 'completed', lane + ' validates from the unwrapped value')
+      assert.equal(approved.lanes[lane].receipt.verdict, 'OKAY')
+      assert.equal(approved.lanes[lane].receipt.stopReason, 'completed')
+      assert.equal(approved.lanes[lane].result.lane, lane)
+    }
+    assert.equal(JSON.stringify(world.outputs).includes('OKAY approved'), false, 'wrapper prose never becomes the receipt')
+    const checked = await world.handoffCheck()
+    assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics))
+    assert.equal(checked.outcome, 'required_lease')
+    assert.equal(checked.lease.required, true)
+    assert.equal(checked.lease.approvedRoundId, round.roundId)
+    const leaseCheck = await world.assertLease(checked.lease)
+    assert.equal(leaseCheck.ok, true, JSON.stringify(leaseCheck))
+    assert.equal(world.writeProbe().allowed, true, 'the required lease unlocks execute writes')
+    summary = { state: 'approved' }
+  } finally {
+    const cleanup = await world.close()
+    world.cleanupReceipt = cleanup
+  }
+  assert.equal(world.cleanupReceipt.approved, 1)
+  assert.equal(world.cleanupReceipt.starts, 2)
+  assertNoLeak(world, 'native-wrapper-approval')
+  world.assertClean()
+  assert.equal(summary.state, 'approved')
+  t.diagnostic('native-wrapper: lanes=2 state=approved handoff=required_lease leaseAssert=ok write=allowed')
+})
+
+test('malformed native wrappers fail their lanes closed and cannot fabricate an approval', async t => {
+  const world = await createWorld(t)
+  let summary = null
+  try {
+    const { round } = await requireAndStart(world)
+    await finishRound(world)
+    // Missing structured, and a non-completed run that still carries a valid capture.
+    world.subagents.resolve('practical', { output: [{ type: 'text', text: 'OKAY approved' }], stopReason: 'completed' })
+    world.subagents.resolve('adversarial', { output: [{ type: 'text', text: 'OKAY approved' }], stopReason: 'error', structured: okay(round, 'adversarial') })
+    const waited = await world.wait()
+    assert.equal(waited.ok, true, JSON.stringify(waited.diagnostics))
+    assert.equal(waited.state, 'inconclusive')
+    assert.equal(waited.approved, false)
+    const roundState = waited.record.rounds.find(entry => entry.roundId === round.roundId)
+    for (const lane of REVIEW_LANES) {
+      assert.equal(roundState.lanes[lane].status, 'failed', lane + ' lane fails closed')
+      assert.equal(roundState.lanes[lane].reason, 'error')
+      assert.equal(roundState.lanes[lane].result, null, lane + ' lane stores no result')
+      assert.equal(roundState.lanes[lane].receipt, null, lane + ' lane issues no receipt')
+    }
+    assert.equal(JSON.stringify(waited).includes('"OKAY"'), false, 'no wrapper prose or discarded capture becomes a verdict')
+    const checked = await world.handoffCheck()
+    assert.equal(checked.ok, false)
+    assert.equal(checked.code, 'HANDOFF_NOT_APPROVED')
+    assert.equal(checked.lease ?? null, null, 'a failed round unlocks no lease')
+    summary = { state: 'inconclusive' }
+  } finally {
+    const cleanup = await world.close()
+    world.cleanupReceipt = cleanup
+  }
+  assert.equal(world.cleanupReceipt.approved, 0)
+  assert.equal(world.cleanupReceipt.starts, 2)
+  assertNoLeak(world, 'malformed-native-wrapper')
+  world.assertClean()
+  assert.equal(summary.state, 'inconclusive')
+  t.diagnostic('malformed-wrapper: practical=missing-structured adversarial=non-completed-with-capture state=inconclusive lanes=failed/error handoff=HANDOFF_NOT_APPROVED')
+})
+
 test('a legal status tick keeps a fresh required handoff check re-checkable; an instruction edit revokes it', async t => {
   const world = await createWorld(t)
   let summary = null

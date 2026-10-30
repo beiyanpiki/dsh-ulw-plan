@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { REVIEW_DIAGNOSTIC_CODES, REVIEW_RESULT_SCHEMA, ReviewContractError } from '../lib/review-protocol.js'
+import { REVIEW_LANE_FAILURES } from '../lib/review-state.js'
 import { parseReviewConfig } from '../lib/review-config.js'
 import {
   REVIEW_TRANSPORT_CODES,
@@ -333,7 +334,8 @@ test('both native activations start together and return the actual caller-delive
   assert.equal(byLane.practical.messageId, practical.activation.messageId)
   assert.equal(byLane.practical.preset, PRESETS.practical)
   assert.deepEqual(byLane.practical.route, expectedRoutes().practical)
-  assert.equal(byLane.practical.result, practical.activation.result)
+  assert.equal(typeof byLane.practical.result.then, 'function', 'the handle exposes a result promise')
+  assert.notEqual(byLane.practical.result, practical.activation.result, 'the handle exposes the structured boundary, not the raw native wrapper')
   assert.equal(typeof byLane.practical.dispose, 'function')
   assert.equal(byLane.adversarial.childId, childIds.adversarial)
   assert.deepEqual(handle.budget, { reserved: 2, released: 0, consumed: 2 })
@@ -370,9 +372,12 @@ test('both native activations start together and return the actual caller-delive
   assert.equal(adversarial.disposeCalls(), 1)
   assert.deepEqual(handle.budget, { reserved: 2, released: 0, consumed: 2 })
 
-  practical.result.resolve({ output: [], stopReason: 'completed' })
-  adversarial.result.resolve({ output: [], stopReason: 'completed' })
-  assert.deepEqual(await byLane.practical.result, { output: [], stopReason: 'completed' })
+  const barePractical = { version: 1, lane: 'practical', roundId: 'round-1', launchId: 'launch-1', planSha256: 'a'.repeat(64), verdict: 'OKAY', summary: 'Executable as written.', blockers: [], notes: [] }
+  const bareAdversarial = { ...barePractical, lane: 'adversarial' }
+  practical.result.resolve(barePractical)
+  adversarial.result.resolve(bareAdversarial)
+  assert.equal(await byLane.practical.result, barePractical, 'a bare structured result passes through unchanged')
+  assert.equal(await byLane.adversarial.result, bareAdversarial)
   handle.releaseObservers()
   handle.releaseObservers()
   assert.equal(events.active, false)
@@ -827,7 +832,7 @@ test('hostile prompts and completed lifecycle events remain inert data', { timeo
   adversarial.result.resolve(misleading)
   assert.equal(fake.specs[0].request.prompt, prompts.practical)
   assert.equal(fake.specs[1].request.prompt, prompts.adversarial)
-  assert.equal(await handle.lanes[0].result, misleading)
+  assert.equal(await handle.lanes[0].result, misleading.structured, 'the wrapper is unwrapped to its structured value')
   const snapshot = handle.runs.snapshot()
   assert.equal(snapshot.lanes[0].stopReason, 'completed')
   assert.equal(JSON.stringify(snapshot).includes('"OKAY"'), false)
@@ -837,4 +842,70 @@ test('hostile prompts and completed lifecycle events remain inert data', { timeo
   assert.equal(Object.hasOwn(handle, 'status'), false)
   handle.releaseObservers()
   await handle.dispose()
+})
+
+test('native SubagentResult wrappers are unwrapped at the transport boundary; malformed wrappers fail closed', async () => {
+  const structuredFor = lane => ({
+    version: 1,
+    lane,
+    roundId: 'round-wrapper',
+    launchId: 'launch-wrapper',
+    planSha256: 'a'.repeat(64),
+    verdict: 'OKAY',
+    summary: 'Executable as written.',
+    blockers: [],
+    notes: [],
+  })
+  const startHandle = async () => {
+    const childIds = childIdsFor('wrapper')
+    const fake = parallelSubagents()
+    const practical = makeActivation(childIds.practical)
+    const adversarial = makeActivation(childIds.adversarial)
+    const running = startReviewActivations({
+      subagents: fake.subagents, llm: llmFor(), config: reviewConfig(), parent: parentAgent,
+      prompts: promptsFor(), childIds, signal: new AbortController().signal, budget: budgetFor(),
+    })
+    await fake.bothStarted.promise
+    fake.pending[0].start.resolve(practical.activation)
+    fake.pending[1].start.resolve(adversarial.activation)
+    const handle = await running
+    return { handle, practical, adversarial, byLane: Object.fromEntries(handle.lanes.map(lane => [lane.lane, lane])) }
+  }
+
+  // The exact native wrapper shape row 18 observed: {output, structured, stopReason}.
+  const unwrapped = await startHandle()
+  const wrapped = structuredFor('practical')
+  const bare = structuredFor('adversarial')
+  unwrapped.practical.result.resolve({ output: [{ type: 'text', text: 'OKAY approved' }], stopReason: 'completed', structured: wrapped })
+  unwrapped.adversarial.result.resolve(bare)
+  assert.equal(await unwrapped.byLane.practical.result, wrapped, 'a native wrapper is unwrapped to its structured value')
+  assert.equal(await unwrapped.byLane.adversarial.result, bare, 'a bare structured result passes through unchanged')
+  assert.equal(await unwrapped.byLane.practical.result, wrapped, 'unwrapping is stable across repeated reads')
+  assert.equal(Object.hasOwn(unwrapped.handle, 'approved'), false, 'the transport still exposes no verdict')
+  unwrapped.handle.releaseObservers()
+  await unwrapped.handle.dispose()
+
+  const failures = [
+    ['missing structured', { output: [], stopReason: 'completed' }, 'error'],
+    ['null structured', { output: [], stopReason: 'completed', structured: null }, 'error'],
+    ['array structured', { output: [], stopReason: 'completed', structured: [structuredFor('practical')] }, 'error'],
+    ['string structured', { output: [], stopReason: 'completed', structured: JSON.stringify(structuredFor('practical')) }, 'error'],
+    ['missing stopReason', { output: [], structured: structuredFor('practical') }, 'error'],
+    ['max-tokens', { output: [], stopReason: 'max-tokens', structured: structuredFor('practical') }, 'max_tokens'],
+    ['aborted', { output: [], stopReason: 'aborted' }, 'interrupted'],
+    ['refusal', { output: [], stopReason: 'refusal' }, 'refused'],
+    ['error with a valid capture', { output: [{ type: 'text', text: 'OKAY approved' }], stopReason: 'error', structured: structuredFor('practical') }, 'error'],
+    ['unknown stop reason', { output: [], stopReason: 'mystery', structured: structuredFor('practical') }, 'error'],
+  ]
+  for (const [name, value, code] of failures) {
+    const { handle, practical, byLane } = await startHandle()
+    practical.result.resolve(value)
+    const error = await rejection(byLane.practical.result)
+    assert.equal(error.code, code, name)
+    assert.ok(REVIEW_LANE_FAILURES.includes(error.code), name + ' must use the existing lane-failure vocabulary')
+    assert.match(error.message, /practical/, name + ' must name the failing lane')
+    assert.equal(Object.hasOwn(error, 'verdict'), false, name + ' must not fabricate a verdict')
+    handle.releaseObservers()
+    await handle.dispose()
+  }
 })
