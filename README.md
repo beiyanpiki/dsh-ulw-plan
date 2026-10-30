@@ -79,7 +79,7 @@ omo 没有的逃生口：显式切换本会话的 ulw 模式。投影也接受�
 
 #### 配置：默认关闭，显式授权
 
-不写 `review`（或写 `enabled: false`）就是安全默认：不授权任何路由、零模型调用。`ulw_review` / `ulw_handoff` 仍会注册（工具面始终可见），但 `require` / `start` 以 `CAPABILITY_UNAVAILABLE` 拒绝（disabled or lacks explicit authorization），不会产生 requirement，也不会退回 inline 审批。
+不写 `review`（或写 `enabled: false`）就是安全默认：不授权任何评审路由、零模型调用，也不产生 requirement。`ulw_review` 仍会注册，但 `require` / `start` 以 `CAPABILITY_UNAVAILABLE` 拒绝（disabled or lacks explicit authorization），`/ulw-review` 同样拒绝。增强服务齐全时，`ulw_handoff` 不受 `review.enabled` 影响：普通计划照常拿到 ordinary lease，required 计划在真正双批准前以 `HANDOFF_REVIEW_REQUIRED` / `HANDOFF_NOT_APPROVED` 拒绝。只有 Host 缺少增强服务时，三者才都返回 `CAPABILITY_UNAVAILABLE`。不会退回 inline 审批。
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml

@@ -6,12 +6,15 @@
 # skills. The enhanced review entrypoints (ulw_review, ulw_handoff and the
 # /ulw-review round router) are registered as soon as the plugin loads, but the
 # full review assembly needs the Host services subagents, agentPresets, llm and
-# storage. When one is missing, or when the explicit `review` config is absent
-# or disabled, they answer CAPABILITY_UNAVAILABLE instead of approving. Enabling
-# the face needs an explicit `review` config with two distinct routes and a
-# positive even callBudget (see README). Research and worker delegation ride
-# the Host's own subagent tools, so no presets and no per-session composition
-# are needed here.
+# storage; if one is missing, all three answer CAPABILITY_UNAVAILABLE. With the
+# explicit `review` config absent or disabled, ulw_review and /ulw-review refuse
+# with CAPABILITY_UNAVAILABLE, while ulw_handoff stays usable: it grants an
+# ordinary lease for ordinary plans and refuses a required plan with
+# HANDOFF_REVIEW_REQUIRED / HANDOFF_NOT_APPROVED until a real dual approval
+# exists. Enabling the review face needs an explicit `review` config with two
+# distinct routes and a positive even callBudget (see README). Research and
+# worker delegation ride the Host's own subagent tools, so no presets and no
+# per-session composition are needed here.
 - insert:
     - id: omo
       name: dsh-ulw-plan
