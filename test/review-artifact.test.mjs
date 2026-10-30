@@ -112,6 +112,56 @@ test('a task section stays open across H3+ subheadings: legal ticks keep instruc
   assert.notEqual(computeInstructionSha256(duplicated), computeInstructionSha256(duplicated.replace('- [ ] 1. second', '- [x] 1. second')))
 })
 
+test('task-section headings follow plan-state: column zero, ATX H2, case-insensitive', () => {
+  const headings = [
+    ['## Todos', '1'],
+    ['## TODOS', '1'],
+    ['## todos', '1'],
+    ['## ToDoS', '1'],
+    ['## Final verification wave', 'F1'],
+    ['## FINAL VERIFICATION WAVE', 'F1'],
+    ['## final verification wave', 'F1'],
+    ['## Final Verification Wave', 'F1'],
+    ['##\tTodos', '1'],
+    ['## Todos\t', '1'],
+    ['## Todos ##', '1'],
+  ]
+  for (const [heading, id] of headings) {
+    const base = heading + '\n- [ ] ' + id + '. task\n  QA: heading parity\n'
+    const original = computeInstructionSha256(base)
+    for (const status of ['x', '~']) {
+      const ticked = applyTick(base, id, status)
+      assert.equal(ticked.changed, true, heading)
+      assert.equal(computeInstructionSha256(ticked.content), original, heading + ' -> ' + status)
+    }
+  }
+  const reopened = '## Todos\n- [ ] 1. first\n## Scope\n### Notes\n## TODOS\n- [ ] 2. second\n'
+  assert.equal(computeInstructionSha256(applyTick(reopened, '2', 'x').content), computeInstructionSha256(reopened))
+})
+
+test('indented and otherwise non-column-zero heading-like lines never close a task section', () => {
+  const samples = [
+    ['indented duplicate Todos', '## Todos\n ## Todos\n- [ ] 1. task\n  QA: after a non-column-zero heading\n', '1'],
+    ['indented Final wave inside Todos', '## Todos\n- [ ] 1. first\n   ## Final verification wave\n- [ ] 2. second\n', '2'],
+    ['indented non-task H2', '## Todos\n  ## Scope\n- [ ] 1. task\n  QA: after a non-column-zero scope\n', '1'],
+    ['tab-indented non-task H2', '## Todos\n\t## Scope\n- [ ] 1. task\n  QA: after a tab-indented scope\n', '1'],
+    ['quoted non-task H2', '## Todos\n> ## Scope\n- [ ] 1. task\n  QA: after a quoted scope\n', '1'],
+    ['commented non-task H2', '## Todos\n<!--\n## Scope\n-->\n- [ ] 1. task\n  QA: after a commented scope\n', '1'],
+    ['fenced heading-like line', '## Todos\n~~~md\n## Final verification wave\n- [ ] 9. fenced demo\n~~~\n- [ ] 1. task\n  QA: after a fenced heading\n', '1'],
+    ['H3 and H4 heading-like lines', '## Todos\n### TODOS\n#### FINAL VERIFICATION WAVE\n- [ ] 1. task\n  QA: after H3 and H4\n', '1'],
+  ]
+  for (const [name, base, id] of samples) {
+    const ticked = applyTick(base, id, 'x')
+    assert.equal(ticked.changed, true, name)
+    assert.equal(computeInstructionSha256(ticked.content), computeInstructionSha256(base), name)
+  }
+  // A column-zero H2 still closes the section for both parsers.
+  const closed = '## Todos\n- [ ] 1. first\n## Scope\n- [ ] 2. second\n'
+  assert.equal(computeInstructionSha256(applyTick(closed, '1', 'x').content), computeInstructionSha256(closed))
+  assert.throws(() => applyTick(closed, '2', 'x'), error => error.exitCode === 2)
+  assert.notEqual(computeInstructionSha256(closed.replace('- [ ] 2.', '- [x] 2.')), computeInstructionSha256(closed))
+})
+
 test('instruction revalidation accepts a legal tick after an H3 and rejects a text edit after it', async t => {
   const base = '## Todos\n### Notes\n- [ ] 1. task\n  QA: after H3\n## Final verification wave\n### Audit\n- [ ] F1. final\n'
   const f = await fixture(t, base)
