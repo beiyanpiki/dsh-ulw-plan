@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // plan-lint.mjs - read-only structural preflight for a ulw work plan.
 //
-// Usage:  plan-lint.mjs <plan.md> [--json]
+// Usage:  plan-lint.mjs <plan.md> [--workspace <dir>] [--json]
 //
 // Exit codes: 0 valid, 2 structural defects found, 5 usage/IO (nothing linted).
 //
@@ -24,7 +24,7 @@ import { pathToFileURL } from 'node:url'
 import { lintPlan } from '../../../lib/review-lint.js'
 
 const USAGE = [
-  'usage: plan-lint.mjs <plan.md> [--json]',
+  'usage: plan-lint.mjs <plan.md> [--workspace <dir>] [--json]',
   '',
   'Structural preflight only: parses fences, comments, quotes and nested lines, then',
   'checks canonical section order, task ids, task slots, IS/GAP mapping and existing',
@@ -97,12 +97,30 @@ function formatText(path, result) {
   return lines.join('\n') + '\n'
 }
 
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function main(argv) {
   const args = argv.slice(2)
   let json = false
   let planPath
-  for (const arg of args) {
+  // Explicit workspace, defaulting to the historical process.cwd(). Passing it makes
+  // the verdict independent of the directory the CLI happens to run from.
+  let workspace = process.cwd()
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
     if (arg === '--json') json = true
+    else if (arg === '--workspace') {
+      const value = args[index + 1]
+      if (value === undefined || value.startsWith('--')) throw new UsageError('missing value for --workspace\n' + USAGE)
+      workspace = value
+      index += 1
+    } else if (arg.startsWith('--workspace=')) workspace = arg.slice('--workspace='.length)
     else if (arg === '--help' || arg === '-h') {
       process.stdout.write(USAGE + '\n')
       return 0
@@ -111,7 +129,8 @@ function main(argv) {
     else throw new UsageError('unexpected argument: ' + arg + '\n' + USAGE)
   }
   if (planPath === undefined) throw new UsageError(USAGE)
-  const result = lintPlan({ content: readSource(planPath), path: planPath, workspace: process.cwd() })
+  if (!isDirectory(workspace)) throw new UsageError('not a directory: ' + workspace)
+  const result = lintPlan({ content: readSource(planPath), path: planPath, workspace })
   process.stdout.write(json ? JSON.stringify(result) + '\n' : formatText(planPath, result))
   return result.valid ? 0 : 2
 }

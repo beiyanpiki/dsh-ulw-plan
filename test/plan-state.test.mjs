@@ -3,7 +3,7 @@
  * one-byte ticks that refuse concurrent edits, and ledger validation.
  */
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,9 +26,18 @@ const CLI = fileURLToPath(new URL('../skills/ulw-execute/scripts/plan-state.mjs'
 const PAUSE_HOOK = `const fs = require('node:fs')
 const original = fs.readFileSync
 let paused = false
+const isPlanRead = (path) => {
+  // plan-state reads through one descriptor, so match the fd's identity to the plan.
+  if (typeof path === 'number') {
+    const read = fs.fstatSync(path)
+    const plan = fs.statSync(process.env.PLAN_STATE_BARRIER)
+    return read.dev === plan.dev && read.ino === plan.ino
+  }
+  return String(path) === process.env.PLAN_STATE_BARRIER
+}
 fs.readFileSync = function (path, ...rest) {
   const result = original.call(this, path, ...rest)
-  if (!paused && String(path) === process.env.PLAN_STATE_BARRIER) {
+  if (!paused && isPlanRead(path)) {
     paused = true
     process.stderr.write('SNAPSHOT_READY' + String.fromCharCode(10))
     fs.readSync(0, Buffer.alloc(1), 0, 1, null)
@@ -169,11 +178,14 @@ test('a UTF-8 BOM does not hide the canonical heading on the first line', () => 
   assert.deepEqual(parseRows(plan).map(({ id }) => id), ['1'])
 })
 
-test('a row on the first line after a UTF-8 BOM keeps its byte offset', () => {
+test('a BOM-prefixed first-line row is never executable, exactly like review-lint', () => {
   const plan = '\uFEFF- [ ] 1. first\n- [ ] 2. second\n'
-  const result = applyTick(plan, '1')
-  assert.equal(result.offset, 6)
-  assert.equal(result.content.toString('utf8'), '\uFEFF- [x] 1. first\n- [ ] 2. second\n')
+  assert.deepEqual(parseRows(plan).map(({ id }) => id), ['2'])
+  assert.throws(() => applyTick(plan, '1'), exitCodeIs(2))
+  const result = applyTick(plan, '2')
+  const rowStart = Buffer.byteLength(plan.slice(0, plan.indexOf('- [ ] 2. second')))
+  assert.equal(result.offset, rowStart + 3)
+  assert.equal(result.content.toString('utf8'), '\uFEFF- [ ] 1. first\n- [x] 2. second\n')
 })
 
 test('headings inside fenced blocks do not change the task section', () => {
@@ -432,6 +444,118 @@ test('the CLI refuses a tick that loses the read race and preserves every concur
     assert.equal(readFileSync(planPath, 'utf8'), concurrent)
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const CRLF_SAMPLE = [
+  '# Plan',
+  '',
+  '## Todos',
+  '```md',
+  '- [ ] 90. fenced demo row',
+  '```',
+  '- [ ] 1. real task',
+  '- [~] 2. blocked task',
+  '## Final verification wave',
+  '- [ ] F1. audit',
+  '',
+].join('\n')
+
+test('a CRLF plan yields the same sections, fences and selected rows as its LF form', () => {
+  const crlf = CRLF_SAMPLE.replace(/\n/g, '\r\n')
+  assert.deepEqual(parseRows(crlf), parseRows(CRLF_SAMPLE))
+  assert.deepEqual(parseRows(crlf).map(({ id }) => id), ['1', '2', 'F1'])
+  assert.deepEqual(summarize(crlf), summarize(CRLF_SAMPLE))
+  assert.equal(summarize(crlf).next, '1')
+  assert.throws(() => applyTick(crlf, '90'), exitCodeIs(2))
+  const result = applyTick(crlf, '1')
+  assert.equal(result.changed, true)
+  assert.ok(result.content.equals(Buffer.from(crlf.replace('- [ ] 1. real task', '- [x] 1. real task'), 'utf8')))
+  assert.equal((result.content.toString('utf8').match(/\r\n/g) || []).length, (crlf.match(/\r\n/g) || []).length)
+})
+
+test('a row under a BOM-prefixed heading keeps its byte offset', () => {
+  const plan = '\uFEFF## Todos\n- [ ] 1. first\n- [ ] 2. second\n'
+  const result = applyTick(plan, '1')
+  const rowStart = Buffer.byteLength(plan.slice(0, plan.indexOf('- [ ] 1. first')))
+  assert.equal(result.offset, rowStart + 3)
+  assert.equal(result.content.toString('utf8'), '\uFEFF## Todos\n- [x] 1. first\n- [ ] 2. second\n')
+})
+
+test('frontmatter is metadata, never a task section', () => {
+  const plan = [
+    '---',
+    'title: demo',
+    '## Todos',
+    '- [ ] 90. frontmatter row',
+    '---',
+    '## Todos',
+    '- [ ] 1. real',
+    '## Final verification wave',
+    '- [ ] F1. audit',
+    '',
+  ].join('\n')
+  assert.deepEqual(parseRows(plan).map(({ id }) => id), ['1', 'F1'])
+  assert.throws(() => applyTick(plan, '90'), exitCodeIs(2))
+  assert.deepEqual(parseRows(plan.replace(/\n/g, '\r\n')).map(({ id }) => id), ['1', 'F1'])
+  // an unterminated "---" opener is not frontmatter, exactly like review-lint
+  const unclosed = '---\n## Todos\n- [ ] 1. real\n'
+  assert.deepEqual(parseRows(unclosed).map(({ id }) => id), ['1'])
+})
+
+test('the CLI selects only real rows in a CRLF plan with a fenced demo and writes one byte', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'plan-state-crlf-'))
+  try {
+    const planPath = join(dir, 'plan.md')
+    const before = Buffer.from(CRLF_SAMPLE.replace(/\n/g, '\r\n'), 'utf8')
+    writeFileSync(planPath, before)
+    chmodSync(planPath, 0o640)
+    const inode = statSync(planPath).ino
+    const demo = spawnSync(process.execPath, [CLI, 'tick', planPath, '90'], { encoding: 'utf8' })
+    assert.equal(demo.status, 2)
+    assert.equal(demo.stdout, '')
+    assert.match(demo.stderr, /row not found: 90/)
+    assert.ok(readFileSync(planPath).equals(before))
+    const status = spawnSync(process.execPath, [CLI, 'status', planPath, '--json'], { encoding: 'utf8' })
+    assert.equal(status.status, 0)
+    const record = JSON.parse(status.stdout)
+    assert.equal(record.total, 3)
+    assert.equal(record.next, '1')
+    assert.equal(record.line, 7)
+    const real = spawnSync(process.execPath, [CLI, 'tick', planPath, '1'], { encoding: 'utf8' })
+    assert.equal(real.status, 0)
+    assert.equal(real.stdout, 'ticked 1 x\n')
+    const after = readFileSync(planPath)
+    assert.equal(after.length, before.length)
+    assert.equal(statSync(planPath).mode & 0o777, 0o640)
+    assert.equal(statSync(planPath).ino, inode)
+    const differences = []
+    for (let index = 0; index < before.length; index += 1) {
+      if (before[index] !== after[index]) differences.push(index)
+    }
+    assert.equal(differences.length, 1)
+    assert.equal(after[differences[0]], 'x'.charCodeAt(0))
+    assert.equal(differences[0], before.indexOf(Buffer.from('- [ ] 1. real task')) + 3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a FIFO plan refuses instead of hanging status and tick', { skip: process.platform === 'win32', timeout: 6000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'plan-state-fifo-'))
+  try {
+    const fifo = join(dir, 'plan.fifo')
+    execFileSync('mkfifo', [fifo])
+    const started = Date.now()
+    const status = spawnSync(process.execPath, [CLI, 'status', fifo], { encoding: 'utf8', timeout: 3000 })
+    assert.equal(status.status, 5)
+    assert.match(status.stderr, /regular file/)
+    assert.ok(Date.now() - started < 3000)
+    const tick = spawnSync(process.execPath, [CLI, 'tick', fifo, '1'], { encoding: 'utf8', timeout: 3000 })
+    assert.equal(tick.status, 5)
+    assert.match(tick.stderr, /regular file/)
+  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
