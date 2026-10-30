@@ -1,0 +1,6 @@
+# Fidelity notes (fixture)
+
+The corpus mirrors the ULW plan grammar documented in skills/ulw-plan/references/full-workflow.md.
+
+- 计划行必须在第 0 列。
+- fenced 与 comment 内的行不执行。

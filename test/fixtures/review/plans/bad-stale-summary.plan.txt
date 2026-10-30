@@ -1,0 +1,89 @@
+# corpus-bad-stale-summary - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the operator deciding whether persistence changed.
+**Outcome:** a stale machine summary that says no persistence while a todo adds it.
+
+---
+
+> TL;DR (machine): Quick / Low；3 个实施 todo；不涉及持久化与重启恢复。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 重启后评审记录仍可读取。 | 4 交付。 |
+| GAP-1 | 重启后记录丢失。 | 4 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+- Wave 2: task 4
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 增加记录形状校验
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/review-lint.js:1-3` 旁增加记录形状校验函数；不改变既有输出。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 4
+  References: `lib/review-lint.js:1-3`；`docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/review-lint.test.mjs` 退出 0。
+  QA scenarios: Happy “shape-validated” 记录形状被校验。Failure “shape-missed” 形状不合法时未拒绝。
+  Commit: Y | feat(review): validate record shape
+
+- [ ] 2. 增加配置读取
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 读取 `docs/fidelity.md` 中的默认配置说明；不引入新依赖。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 4
+  References: `docs/fidelity.md`；`$E/task-2.txt`。
+  Acceptance criteria: 配置读取路径有文档依据。
+  QA scenarios: Happy “config-read” 配置被读取。Failure “config-missing” 缺配置时启动失败。
+  Commit: Y | feat(config): read defaults
+
+- [ ] 3. 增加错误映射
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 把校验错误映射为诊断码；不修改持久化层。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 4
+  References: `docs/fidelity.md`；`$E/task-3.txt`。
+  Acceptance criteria: 诊断码与文档一致。
+  QA scenarios: Happy “codes-mapped” 错误码可读。Failure “codes-raw” 原始异常泄漏。
+  Commit: Y | feat(review): map diagnostics
+
+- [ ] 4. 新增重启后的持久化读取
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 新建 `lib/review-store.js` 并在重启后从磁盘读取记录；不修改既有解析器。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: F1
+  References: `lib/review-lint.js:1-3`；`lib/review-store.js`；`$E/task-4.txt`。
+  Acceptance criteria: 重启后读取返回同一记录。
+  QA scenarios: Happy “restart-reads” 重启后记录仍可读取。Failure “restart-lost” 重启后记录丢失。
+  Commit: Y | feat(store): persist review records
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 3 | Blocked by: 4 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 4,F1 | restart-reads | `$E/task-4.txt` |

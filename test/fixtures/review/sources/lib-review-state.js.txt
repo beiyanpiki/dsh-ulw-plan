@@ -1,0 +1,3 @@
+export function validateRecord(record) {
+  return record !== null && typeof record === 'object' && record.version === 1
+}

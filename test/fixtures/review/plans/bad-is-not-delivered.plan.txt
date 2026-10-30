@@ -1,0 +1,72 @@
+# corpus-bad-is-not-delivered - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the operator who restarts the host and expects the review record back.
+**Outcome:** a plan that maps every ideal-state row but delivers only one of them.
+
+---
+
+> TL;DR (machine): Quick / Low；2 个实施 todo；重启可读性只写在文档里。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 损坏的评审记录在读取时被拒绝。 | 1 交付。 |
+| IS-2 | 评审记录在重启后仍可读取。 | 2 声称交付。 |
+| GAP-1 | 损坏记录被静默接受。 | 1 关闭。 |
+| GAP-2 | 记录在重启后丢失。 | 2 声称关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+- Wave 2: task 2
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 拒绝损坏的评审记录
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 在 `lib/review-state.js:1-3` 增加记录形状校验；不新增持久化。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: 2
+  References: `lib/review-state.js:1-3`；`docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/review-state.test.mjs` 退出 0。
+  QA scenarios: Happy “corrupt-rejected” 损坏记录被拒绝。Failure “corrupt-accepted” 损坏记录被接受即失败。
+  Commit: Y | fix(review): reject corrupt records
+
+- [ ] 2. 更新重启语义文档
+  Recommended task executor category: writing — documentation
+  What to do / Must NOT do: 更新 `docs/fidelity.md` 的说明，声明记录在重启后仍可读取；不修改任何持久化代码。
+  Closes: GAP-2
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: F1
+  References: `docs/fidelity.md`；`$E/task-2.txt`。
+  Acceptance criteria: 文档评审通过，无代码变更。
+  QA scenarios: Happy “docs-claim-restart” 文档写明重启可读。Failure “claim-without-code” 只有文档声明时无测试可证。
+  Commit: Y | docs(review): describe restart reads
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 3 | Blocked by: 2 | Blocks: —
+  References: `docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | corrupt-rejected | `$E/task-1.txt` |
+| IS-2 | 2,F1 | restart-readable | `$E/task-2.txt` |

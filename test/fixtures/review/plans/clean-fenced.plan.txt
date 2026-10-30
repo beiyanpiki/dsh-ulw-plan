@@ -1,0 +1,74 @@
+# corpus-clean-fenced - Work Plan
+
+## TL;DR (For humans)
+**Who this is for:** the ULW plan author who documents examples inside the plan.
+**Outcome:** fenced task-shaped lines stay examples, never executable rows.
+
+---
+
+> TL;DR (machine): Quick / Low；1 个实施 todo + F1；fence 内的行只是示例。
+
+## Scope
+### Affected user and ideal state
+| Row | Statement | Reason |
+| --- | --- | --- |
+| IS-1 | 文档中的示例不能被当作可执行任务。 | 解析器区分 fence 边界。 |
+| GAP-1 | 计划模板缺少 fence 示例。 | 1 关闭。 |
+
+## Verification strategy
+> Zero human intervention - all verification is agent-executed.
+- Test decision: TDD + node:test
+
+## Execution strategy
+### Parallel execution waves
+- Wave 1: task 1
+
+## Todos
+> Implementation + Test = ONE todo. Never separate.
+
+- [ ] 1. 在计划中演示 fence 边界
+  Recommended task executor category: quick — mechanical
+  What to do / Must NOT do: 阅读 `lib/review-lint.js`；在文档中保留示例 fence；不修改解析器。
+  Closes: GAP-1
+  Parallelization: Wave 1 | Blocked by: — | Blocks: F1
+  References: `lib/review-lint.js:1-3`；`docs/fidelity.md`；`$E/task-1.txt`。
+  Acceptance criteria: `node --test test/review-lint.test.mjs` 退出 0。
+  QA scenarios: Happy “fenced-examples” 示例行仍只是文本。Failure “fence-leak” fence 未闭合时逐行报错。
+  Commit: Y | test(corpus): fenced examples
+
+以下示例位于 `## Todos` 中，但 fence 内的行只是文本，不是可执行任务：
+
+```md
+- [ ] 9. 示例任务：fence 内的行列不是 todo
+- [ ] F8. 示例终审行：同样只是文本
+```
+
+```sh
+node --test test/review-lint.test.mjs
+echo "lint never executes these commands"
+```
+
+~~~json
+{"version":1,"lane":"practical","verdict":"OKAY","blockers":[],"notes":["fenced example only"]}
+~~~
+
+## Final verification wave
+> Runs in parallel after ALL todos.
+
+- [ ] F1. Plan compliance audit
+  Recommended task executor category: unspecified-high — audit
+  What to do / Must NOT do: 只读核对每个 todo 与证据；不修改任何文件。
+  Closes: GAP-1
+  Parallelization: Wave 2 | Blocked by: 1 | Blocks: —
+  References: `lib/review-lint.js:1-3`；`$E/task-1.txt`。
+  Acceptance criteria: 每项都有证据。
+  QA scenarios: Happy “audit-passes” 逐项对照证据。Failure “no-evidence” 缺证据即拒绝。
+  Commit: N | 审计不单独提交
+
+## Commit strategy
+- 每个 N 项与测试一起提交。
+
+## Success criteria
+| IS | Delivering todo(s) | Proving QA scenario | Evidence |
+| --- | --- | --- | --- |
+| IS-1 | 1,F1 | fenced-examples | `$E/task-1.txt` |
