@@ -28,7 +28,11 @@ import { FINAL_VERIFICATION_ITEMS, PLAN_SECTION_HEADERS, buildDraft, buildPlanSk
 // The emitted text lives in plan-templates.mjs; re-exported so importers keep one entry point.
 export { FINAL_VERIFICATION_ITEMS, PLAN_SECTION_HEADERS, buildDraft, buildPlanSkeleton };
 
-const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// Same canonical grammar as lib/review-lint.js: lowercase alphanumerics joined
+// by single hyphens, 1..80 characters. A looser shape ("a--b", "a-") would
+// scaffold a plan that review can never bind.
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SLUG_MAX_LENGTH = 80;
 
 export function parseArgs(argv) {
 	const rest = argv.slice(2);
@@ -50,8 +54,8 @@ export function parseArgs(argv) {
 		else throw new Error(`unexpected argument: ${arg}`);
 	}
 	if (!slug) throw new Error('usage: scaffold-plan.mjs <slug> [--clear|--unclear] [--draft-only] [--review-required] [--reset [--force]]');
-	if (!SLUG_PATTERN.test(slug)) {
-		throw new Error(`invalid slug "${slug}" - use lowercase letters, digits, and hyphens only`);
+	if (slug.length > SLUG_MAX_LENGTH || !SLUG_PATTERN.test(slug)) {
+		throw new Error(`invalid slug "${slug}" - use lowercase letters, digits, and single hyphens only (1-80 characters)`);
 	}
 	return { slug, intent, reset, force, draftOnly, reviewRequired };
 }

@@ -59,6 +59,25 @@ test('request selectors reject forged authority, multiple targets and noncanonic
   for (const extra of [{approved:true},{sessionId:'worker'},{force:true}]) assert.throws(() => parseHandoffRequest({action:'check',target,...extra}))
   assert.throws(() => parseHandoffRequest({action:'bind-worktree',target}))
 })
+test('plan targets enforce the canonical 1..80 slug grammar', () => {
+  const targetFor = slug => '.dsh/ulw/plans/' + slug + '.md'
+  const boundPrompt = relativePath => buildReviewPrompt({ ...input(), artifact: { ...input().artifact, relativePath } })
+  for (const slug of ['a', 'a-b', 'a1-b2', '1', 'a'.repeat(80)]) {
+    const target = targetFor(slug)
+    assert.equal(parseReviewRequest({ action: 'start', target }).target, target)
+    assert.equal(parseHandoffRequest({ action: 'check', target }).target, target)
+    assert.equal(JSON.parse(boundPrompt(target).split('\n')[1]).artifact.relativePath, target)
+    assert.equal(parseReviewRequest({ action: 'start', target: '/work/' + target }).target, '/work/' + target)
+  }
+  for (const slug of ['a--b', 'a-', 'a_b', 'A-b', 'a'.repeat(81)]) {
+    const target = targetFor(slug)
+    rejects(() => parseReviewRequest({ action: 'start', target }), 'INVALID_REQUEST')
+    rejects(() => parseHandoffRequest({ action: 'check', target }), 'INVALID_REQUEST')
+    assert.throws(() => boundPrompt(target), error => error.code === 'INVALID_REQUEST')
+    rejects(() => parseReviewRequest({ action: 'start', target: '/work/' + target }), 'INVALID_REQUEST')
+  }
+})
+
 test('both lanes retain bound v1 roundtrip without manufacturing runtime receipts', () => {
   for (const lane of ['practical','adversarial']) {
     const raw=result(lane), checked=validateReviewResult(JSON.stringify(raw),binding(lane))
