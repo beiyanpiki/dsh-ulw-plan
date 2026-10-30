@@ -680,7 +680,8 @@ async function main () {
     const forged = await callTool(probeCtx, probeAgent.agent, 'ulw_handoff', { action: 'check', target: PLAN_REL, approved: true })
     pass('native.adversarial.misleading_success_output', true, { isError: forged.isError, text: forged.text.slice(0, 300) }, 'A forged approved flag is not a lease and is rejected or ignored by the real contract.')
     const cancel = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'cancel', roundId: 'round-does-not-exist' })
-    blocked('native.adversarial.cancel_resume', 'cancel a live round', cancel.text.slice(0, 300), 'No live round exists for this session.', { isError: cancel.isError })
+    const cancelRefused = cancel.value?.approved !== true && cancel.value?.completed !== true && /UNKNOWN_ROUND|refused|rejected/i.test(cancel.text)
+    assertRecord('native.adversarial.cancel_resume', cancelRefused ? 'passed' : 'failed', 'an absent round is refused, never approved', { code: cancel.value?.code ?? null, approved: cancel.value?.approved === true, completed: cancel.value?.completed === true, isError: cancel.isError }, 'Cancel of an absent round must be refused, never turned into an approval.', { surface: cancel.text.slice(0, 300) })
     const untracked = existsSync(join(WORKSPACE, 'dirty-untracked.txt')) && existsSync(join(WORKSPACE, 'misleading-draft-okay.txt'))
     pass('native.adversarial.dirty_worktree', true, { untracked }, 'Untracked files and a misleading draft do not become state or approval.')
     const interruptionErrors = []
@@ -692,7 +693,8 @@ async function main () {
     }
     pass('native.adversarial.repeated_interruption', true, { errors: interruptionErrors }, 'Three repeated cancel probes settled without an unhandled rejection.')
     const stale = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'status', roundId: 'round-stale-does-not-exist' })
-    blocked('native.adversarial.stale_state', 'a stale round id is refused, never approved', stale.value?.code ?? stale.text.slice(0, 200), 'A stale round identity was refused; no stale approval was fabricated.', { surface: stale.text })
+    const staleRefused = stale.value?.approved !== true && stale.value?.completed !== true && /UNKNOWN_ROUND|refused|rejected/i.test(stale.text)
+    assertRecord('native.adversarial.stale_state', staleRefused ? 'passed' : 'failed', 'a stale round id is refused, never approved', { code: stale.value?.code ?? null, approved: stale.value?.approved === true, completed: stale.value?.completed === true }, 'A stale round identity must be refused, never approved.', { surface: stale.text.slice(0, 300) })
     const flaky = []
     for (let i = 0; i < 3; i++) {
       const attempt = await callTool(probeCtx, probeAgent.agent, 'ulw_review', { action: 'status', target: PLAN_REL })
