@@ -147,7 +147,7 @@ async function workspace(t, { slug = 'demo-plan', content = '', files = {} } = {
   return { root, path, target: slug === null ? 'plan.md' : '.dsh/ulw/plans/' + slug + '.md' }
 }
 
-test('one canonical slug grammar: scaffold emits a--b and a-, review can never bind them', async t => {
+test('one canonical slug grammar: scaffold, protocol and lint reject a--b and a-', async t => {
   assert.equal(isCanonicalPlanSlug('demo-plan'), true)
   assert.ok(CANONICAL_PLAN_SLUG_RE.test('a1-b2'))
   for (const slug of ['a--b', 'a-', '-a', 'A-b', 'a_b', 'a'.repeat(81), '']) assert.equal(isCanonicalPlanSlug(slug), false, slug)
@@ -156,14 +156,27 @@ test('one canonical slug grammar: scaffold emits a--b and a-, review can never b
   const root = await fs.mkdtemp(join(tmpdir(), 'plan-lint-scaffold-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   for (const slug of ['a--b', 'a-']) {
-    execFileSync(process.execPath, [SCAFFOLD, slug], { cwd: root, stdio: 'ignore' })
+    const failed = spawnSync(process.execPath, [SCAFFOLD, slug], { cwd: root, encoding: 'utf8' })
+    assert.equal(failed.status, 1, slug)
+    assert.match(failed.stderr, /invalid slug/, slug)
+    assert.equal(failed.stdout, '', slug)
     const target = '.dsh/ulw/plans/' + slug + '.md'
+    await assert.rejects(fs.stat(join(root, target)), { code: 'ENOENT' }, slug)
     assert.throws(() => parseReviewRequest({ action: 'start', target }), error => error.code === 'INVALID_REQUEST')
-    const content = await fs.readFile(join(root, target), 'utf8')
-    const result = lintPlan({ content, path: target, workspace: root })
-    assert.equal(result.valid, false, slug)
-    assert.ok(at(result, 'SLUG_NOT_CANONICAL', 0), slug)
   }
+  assert.equal(spawnSync(process.execPath, [SCAFFOLD, 'a-b'], { cwd: root, encoding: 'utf8' }).status, 0)
+  assert.match(await fs.readFile(join(root, '.dsh/ulw/plans/a-b.md'), 'utf8'), /^# a-b - Work Plan/)
+  // The invalid-slug plan is written directly: SLUG_NOT_CANONICAL coverage must not
+  // depend on the scaffold accepting a slug that can never be bound for review.
+  const fixture = await workspace(t, { slug: 'a--b', content: VALID_PLAN, files: { 'lib/plan-source.js': 'export const x = 1\n', 'docs/fidelity.md': '# fidelity\n' } })
+  const result = lintPlan({ content: VALID_PLAN, path: fixture.target, workspace: fixture.root })
+  assert.equal(result.valid, false)
+  assert.deepEqual(result.diagnostics.filter(diagnostic => diagnostic.severity === 'error').map(diagnostic => diagnostic.code), ['SLUG_NOT_CANONICAL'])
+  assert.equal(at(result, 'SLUG_NOT_CANONICAL', 0).line, 0)
+  const cli = run([fixture.path], fixture.root)
+  assert.equal(cli.status, 2, cli.stderr)
+  assert.match(cli.stdout, /error line 0 SLUG_NOT_CANONICAL/)
+  assert.match(cli.stdout, /valid=no/)
 })
 
 test('a legal plan with new targets, evidence paths, urls, globs and fenced demos passes with exact counts', async t => {

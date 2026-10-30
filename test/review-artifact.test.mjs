@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createReviewArtifact, resolveReviewSource, computeInstructionSha256, readArtifactPage, revalidateReviewArtifact, MAX_PAGE_BYTES } from '../lib/review-artifact.js'
+import { isCanonicalPlanSlug } from '../lib/review-lint.js'
+import { applyTick } from '../skills/ulw-execute/scripts/plan-state.mjs'
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const plan = '# 计划 😀\r\n## Todos\r\n- [ ] 1. implement\r\n  QA: assert bytes\r\n## Final verification wave\r\n- [ ] F1. audit\r\n## Success criteria\r\n- [ ] 9. not a task\r\n'
 async function fixture(t, bytes = plan) {
@@ -60,16 +62,16 @@ test('status offsets are verified on raw bytes: BOM rows and de-listing never no
   assert.notEqual(computeInstructionSha256(delisted), computeInstructionSha256(ticked))
 })
 
-test('fenced, quoted, nested, commented, wrong-section and nested-heading rows stay instructional', () => {
+test('fenced, quoted, nested, commented and wrong-section rows stay instructional', () => {
   const samples = [
     '## Scope\n- [ ] 8. row\n',
+    '## Scope\n### Example\n- [ ] 8. row\n',
     '## Todos\n  - [ ] 8. row\n',
     '## Todos\n> - [ ] 8. row\n',
     '## Todos\n\t- [ ] 8. row\n',
     '## Todos\n~~~md\n- [ ] 8. row\n~~~\n',
     '## Todos\n<!--\n- [ ] 8. row\n-->\n',
     '<!--\n## Todos\n-->\n- [ ] 8. row\n',
-    '## Todos\n### Example\n- [ ] 8. row\n',
     '## Final verification wave\n- [ ] 8. row\n',
     '## Todos\n- [ ] F8. row\n',
     '## Todos\n- [ ] 0. row\n',
@@ -78,6 +80,48 @@ test('fenced, quoted, nested, commented, wrong-section and nested-heading rows s
   ]
   samples.push('## Todos\n' + String.fromCharCode(96).repeat(4) + 'md\n- [ ] 8. row\n' + String.fromCharCode(96).repeat(3) + '\n')
   for (const s of samples) assert.notEqual(computeInstructionSha256(s), computeInstructionSha256(s.replace('[ ]', '[x]')), s)
+})
+
+test('canonical plan identity accepts legal slugs and rejects doubled or trailing hyphens', async t => {
+  const f = await fixture(t)
+  const matrix = ['a', 'a-b', 'a1-b2', '1', 'a'.repeat(80), 'a--b', 'a-', '-a', 'A-b', 'a_b', 'a.b', 'ä-b', 'a'.repeat(81)]
+  for (const slug of matrix) {
+    const target = '.dsh/ulw/plans/' + slug + '.md'
+    await fs.writeFile(join(f.workspace, target), plan)
+    let accepted = false
+    try { await createReviewArtifact({ workspace: f.workspace, target }); accepted = true }
+    catch (error) { assert.equal(error.code, 'INVALID_SOURCE', JSON.stringify(slug)) }
+    assert.equal(accepted, isCanonicalPlanSlug(slug), JSON.stringify(slug))
+  }
+  for (const slug of ['a--b', 'a-']) await assert.rejects(resolveReviewSource({ workspace: f.workspace, target: '.dsh/ulw/plans/' + slug + '.md' }), fails('INVALID_SOURCE'), slug)
+  assert.equal((await createReviewArtifact({ workspace: f.workspace, target: '.dsh/ulw/plans/a-b.md' })).source.slug, 'a-b')
+})
+
+test('a task section stays open across H3+ subheadings: legal ticks keep instruction identity', () => {
+  const base = '## Todos\n### Notes\n- [ ] 1. first\n  QA: assert after H3\n#### Deeper\n- [ ] 2. second\n## Final verification wave\n### Audit\n- [ ] F1. final\n'
+  const original = computeInstructionSha256(base)
+  for (const [id, to] of [['1', 'x'], ['2', 'x'], ['1', '~'], ['F1', 'x']]) {
+    const ticked = applyTick(base, id, to)
+    assert.equal(ticked.changed, true)
+    assert.equal(computeInstructionSha256(ticked.content), original, id + ' -> ' + to)
+  }
+  for (const [before, after] of [['### Notes', '### Notes changed'], ['assert after H3', 'assert after H3 changed'], ['first', 'first changed'], ['second', 'second changed'], ['### Audit', '### Audit changed']]) {
+    assert.notEqual(computeInstructionSha256(base.replace(before, after)), original, before)
+  }
+  const duplicated = base.replace('- [ ] 2.', '- [ ] 1.')
+  assert.notEqual(computeInstructionSha256(duplicated), computeInstructionSha256(duplicated.replace('- [ ] 1. second', '- [x] 1. second')))
+})
+
+test('instruction revalidation accepts a legal tick after an H3 and rejects a text edit after it', async t => {
+  const base = '## Todos\n### Notes\n- [ ] 1. task\n  QA: after H3\n## Final verification wave\n### Audit\n- [ ] F1. final\n'
+  const f = await fixture(t, base)
+  const a = await createReviewArtifact(f)
+  const ticked = applyTick(base, '1', 'x').content.toString('utf8')
+  await fs.writeFile(f.path, ticked)
+  assert.equal((await revalidateReviewArtifact(a, { mode: 'instruction' })).valid, true)
+  assert.equal((await revalidateReviewArtifact(a)).stale, true)
+  await fs.writeFile(f.path, ticked.replace('QA: after H3', 'QA: after H3 changed'))
+  assert.equal((await revalidateReviewArtifact(a, { mode: 'instruction' })).valid, false)
 })
 
 test('HTML containers are nested content, and fence info comments do not hide later legal tasks', () => {
