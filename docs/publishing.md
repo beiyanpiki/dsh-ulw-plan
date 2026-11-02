@@ -10,11 +10,11 @@
 
 ```bash
 # 第一次发布前：在 GitHub 仓库 Settings → Secrets and variables → Actions 添加 NPM_TOKEN
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-`v0.1.0` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag、执行 `npm stage publish --access public --provenance`。
+`v0.1.1` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag、执行 `npm stage publish --access public --provenance`。
 
 然后批准（二选一）：
 
@@ -67,8 +67,8 @@ pnpm add <spec>
 
 第 3、4 步的落盘由安装器负责；升级、删除也走同一个入口，见第 5 节。因此 `<spec>` 可以是：
 
-- npm 包名或版本：`dsh-ulw-plan`、`dsh-ulw-plan@0.1.0`、`@scope/dsh-ulw-plan`
-- 本机 tarball：`/path/to/dsh-ulw-plan-0.1.0.tgz`
+- npm 包名或版本：`dsh-ulw-plan`、`dsh-ulw-plan@0.1.1`、`@scope/dsh-ulw-plan`
+- 本机 tarball：`/path/to/dsh-ulw-plan-0.1.1.tgz`
 - GitHub：`github:<owner>/<repo>#<ref>`（私有库需要 pnpm 的 git 凭据）
 - 本地目录：本仓库的检出目录（开发时用，符号链接方式）
 
@@ -178,8 +178,8 @@ Staged publishing 把 2FA 推迟到批准时，因此普通 token 也能由 CI �
 发布：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 workflow 会校验 tag 与 `package.json.version`、跑 `node --test`、执行 `npm stage publish --access public --provenance`。之后：
@@ -194,7 +194,7 @@ npm stage approve <stage-id> --otp <你的6位码>
 
 ```bash
 npm view dsh-ulw-plan version
-gh release create v0.1.0 --generate-notes --verify-tag
+gh release create v0.1.1 --generate-notes --verify-tag
 ```
 
 查看/重跑 workflow：
@@ -236,15 +236,15 @@ npm view dsh-ulw-plan version
 发布前不依赖 npm，也能验证「别人拿到 tarball 能装」：
 
 ```bash
-npm pack                                  # 生成 dsh-ulw-plan-0.1.0.tgz
+npm pack                                  # 生成 dsh-ulw-plan-0.1.1.tgz
 
 # 方案 A：临时 profile（会创建 ~/.dsh/profiles/distcheck）
-dsh plugin --profile distcheck add ./dsh-ulw-plan-0.1.0.tgz
+dsh plugin --profile distcheck add ./dsh-ulw-plan-0.1.1.tgz
 dsh --profile distcheck --dump-config | grep -n dsh-ulw-plan
 
 # 方案 B：当前 web profile（先卸掉本地 link 版本再装 tarball）
 plugin_manager { "action": "remove_bundle", "target": "dsh-ulw-plan" }
-plugin_manager { "action": "install_bundle", "target": "/绝对路径/dsh-ulw-plan-0.1.0.tgz" }
+plugin_manager { "action": "install_bundle", "target": "/绝对路径/dsh-ulw-plan-0.1.1.tgz" }
 plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": true }
 ```
 
@@ -315,7 +315,7 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 
 - `npm pack --dry-run --json` → **43 个文件**：`package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`lib/` 的 20 个模块、`skills/ulw-plan/**` 的 12 个文件、`skills/ulw-execute/**` 的 2 个文件、`docs/fidelity.md`、`docs/publishing.md`、`README.md`、`LICENSE`；不含 `test/`、`qa/`、`.dsh/`、`.vendor/`、`node_modules/`、`.github/`、`docs/migration-plan.md`。
 - 把这 43 个文件原样复制到一个隔离目录后：`import` 包入口得到 `apply` / `inject` / `name`（`name` 为 `dsh-ulw-plan`）；`loadSkill('ulw-plan')` 读出含 `ULW-PLAN MODE ENABLED!` 的技能正文；`icon.svg` 与 `locale/{en,zh}.json`（`omo Workflow` / `omo 工作流`）都能从包内读出；两份 reviewer 契约（`plan-reviewer.md`、`plan-adversarial-reviewer.md`）也随包发出。
-- 更早的一次 distweb 临时 profile 演练（2026-10-23，改名之后）记录如下，只证明包解析与 bundle 声明：`dsh plugin --profile distweb add ./dsh-ulw-plan-0.1.0.tgz` 后 profile 依赖变成 `"dsh-ulw-plan": "file:…/dsh-ulw-plan-0.1.0.tgz"`，`dsh.profile.bundles` 自动追加 `dsh-ulw-plan`，`dsh --profile distweb --dump-config` 出现：
+- 更早的一次 distweb 临时 profile 演练（2026-10-23，改名之后）记录如下，只证明包解析与 bundle 声明：`dsh plugin --profile distweb add ./dsh-ulw-plan-0.1.1.tgz` 后 profile 依赖变成 `"dsh-ulw-plan": "file:…/dsh-ulw-plan-0.1.1.tgz"`，`dsh.profile.bundles` 自动追加 `dsh-ulw-plan`，`dsh --profile distweb --dump-config` 出现：
 
   ```yaml
   # == dsh-ulw-plan
