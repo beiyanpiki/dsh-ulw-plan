@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  stage:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,6 +27,9 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      - name: Ensure npm supports Trusted Publishing
+        run: npm install -g npm@latest && npm --version
+
       - name: Verify tag matches package version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -37,23 +40,32 @@ jobs:
             exit 1
           fi
 
-      - name: Require NPM_TOKEN
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN repository secret is missing; add it in Settings → Secrets and variables → Actions"
-            exit 1
-          fi
-
       - name: Test
         run: node --test
 
-      # 2FA-enabled accounts cannot publish directly from CI with a regular
-      # token. Stage the version instead; a maintainer approves it on npm with
-      # 2FA. Once a Trusted Publisher is configured for this workflow, direct
-      # `npm publish --access public --provenance` becomes possible.
-      - name: Stage on npm
-        run: npm stage publish --access public --provenance
+      # CI publishes directly - no staged approval step.
+      # Preferred: npm Trusted Publisher (OIDC); configure once on npmjs.com
+      #   package -> Settings -> Trusted Publishing -> GitHub Actions:
+      #   owner beiyanpiki, repo dsh-ulw-plan, workflow release.yml, environment empty.
+      # Fallback: NPM_TOKEN holding a classic Automation token (bypass 2FA).
+      - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -u
+          echo "npm $(npm --version)"
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "Trying NPM_TOKEN publish..."
+            if npm publish --access public --provenance; then
+              echo "Published with NPM_TOKEN."
+              exit 0
+            fi
+            echo "::warning::token publish failed; retrying with Trusted Publisher (OIDC)"
+            unset NODE_AUTH_TOKEN
+          fi
+          if npm publish --access public --provenance; then
+            echo "Published with Trusted Publisher (OIDC)."
+            exit 0
+          fi
+          echo "::error::npm publish failed. Configure a Trusted Publisher for beiyanpiki/dsh-ulw-plan (workflow release.yml) or set NPM_TOKEN to an Automation token."
+          exit 1
