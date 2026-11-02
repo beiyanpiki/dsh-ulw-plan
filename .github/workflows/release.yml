@@ -50,22 +50,19 @@ jobs:
       # Fallback: NPM_TOKEN holding a classic Automation token (bypass 2FA).
       - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN_VALUE: ${{ secrets.NPM_TOKEN }}
         run: |
           set -u
           echo "npm $(npm --version)"
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "Trying NPM_TOKEN publish..."
-            if npm publish --access public --provenance; then
-              echo "Published with NPM_TOKEN."
-              exit 0
-            fi
-            echo "::warning::token publish failed; retrying with Trusted Publisher (OIDC)"
-            unset NODE_AUTH_TOKEN
-          fi
+          # Prefer Trusted Publisher (OIDC): no long-lived token on the runner.
           if npm publish --access public --provenance; then
             echo "Published with Trusted Publisher (OIDC)."
             exit 0
+          fi
+          if [ -n "${NPM_TOKEN_VALUE:-}" ]; then
+            echo "::warning::OIDC publish failed; retrying with NPM_TOKEN"
+            NODE_AUTH_TOKEN="$NPM_TOKEN_VALUE" npm publish --access public --provenance
+            exit $?
           fi
           echo "::error::npm publish failed. Configure a Trusted Publisher for beiyanpiki/dsh-ulw-plan (workflow release.yml) or set NPM_TOKEN to an Automation token."
           exit 1
