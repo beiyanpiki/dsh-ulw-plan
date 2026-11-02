@@ -6,24 +6,16 @@
 
 ## 0. 结论先说
 
-本仓库用 GitHub Actions 在 **版本 tag** 上把包 **stage 到 npm**；因为 npm 账号启用了 2FA，最后由维护者用 2FA 批准上线（npm 的 staged publishing）：
+本仓库用 GitHub Actions 在 **版本 tag** 上**直接发布**到 npm：CI 通过 npm Trusted Publisher（GitHub OIDC）换取短期发布凭据，不需要人工批准，也不需要长期 token：
 
 ```bash
-# 第一次发布前：在 GitHub 仓库 Settings → Secrets and variables → Actions 添加 NPM_TOKEN
 git tag v0.1.1
 git push origin v0.1.1
 ```
 
-`v0.1.1` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag、执行 `npm stage publish --access public --provenance`。
+`v0.1.1` 必须与 `package.json.version` 一致。workflow 会跑测试、校验 tag、执行 `npm publish --access public --provenance`。首次使用需在 npmjs.com 配置一次 Trusted Publisher，见 3.1。
 
-然后批准（二选一）：
-
-```bash
-npm stage list dsh-ulw-plan                 # 需要本机已 npm login
-npm stage approve <stage-id> --otp <6位码>  # 或 npmjs.com → 包页面 → Staged versions
-```
-
-批准后版本才真正公开。想要完全无人值守发布，见第 3.1 节的 Trusted Publisher / bypass token 说明。
+发布后版本立即可用；需要人工 staged approval 的旧流程保留在 3.1 末尾。
 
 任何一台 DSH 机器安装：
 
@@ -147,33 +139,28 @@ DSH 的 Plugins 页和插件详情不执行插件代码就会读取：
 
 ## 3. 发布方式
 
-### 3.1 CI 发布（本仓库已配置）
+### 3.1 CI 发布（本仓库已配置，无需人工批准）
 
 - workflow：`.github/workflows/release.yml`
 - 触发：push tag `v*`，或在 Actions 页手动 `Run workflow`
-- 凭据：仓库 **Settings → Secrets and variables → Actions** 添加 `NPM_TOKEN`
+- 默认凭据：**npm Trusted Publisher（GitHub OIDC）**，不需要长期 token
+- 可选回退：`NPM_TOKEN` 存 classic **Automation** token
 
-创建 `NPM_TOKEN`：
+**一次性配置 Trusted Publisher**（npmjs.com → 包 → Settings → Trusted Publishing → GitHub Actions）：
 
-1. 打开 <https://www.npmjs.com/settings/~/tokens>；
-2. **Generate New Token**；
-3. classic 选 **Automation** 或 granular 给 `dsh-ulw-plan` 的 publish 权限；
-4. 添加到 GitHub：网页 Settings，或
+- Owner：`beiyanpiki`
+- Repository：`dsh-ulw-plan`
+- Workflow filename：`release.yml`
+- Environment：留空
 
-   ```bash
-   gh secret set NPM_TOKEN --repo beiyanpiki/dsh-ulw-plan
-   ```
+配置后 workflow 直接执行 `npm publish --access public --provenance`；npm CLI 用 GitHub OIDC 换取短期发布凭据，**不再需要 staged approval，也不需要人工输入 2FA 验证码**。
 
-   命令会交互式读取 token；不要把 token 写进仓库或对话。
-
-**为什么是 stage 而不是直接 publish**：npm 对启用 2FA 的账号要求「granular token with bypass 2FA」才能从 CI 直接发布；普通 token 直接 `npm publish` 会得到 403：
+没有 Trusted Publisher 时的回退：把仓库 secret `NPM_TOKEN` 设为 classic **Automation** token（Automation token 自带 bypass 2FA）。普通 token 直接 publish 会得到 403：
 
 ```text
 403 Forbidden - PUT https://registry.npmjs.org/<pkg>
 Two-factor authentication or granular access token with bypass 2fa enabled is required
 ```
-
-Staged publishing 把 2FA 推迟到批准时，因此普通 token 也能由 CI 上传。
 
 发布：
 
@@ -182,20 +169,7 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-workflow 会校验 tag 与 `package.json.version`、跑 `node --test`、执行 `npm stage publish --access public --provenance`。之后：
-
-```bash
-npm stage list dsh-ulw-plan
-npm stage approve <stage-id> --otp <你的6位码>
-# 或 npmjs.com → 你的包 → Staged versions → Approve
-```
-
-批准后：
-
-```bash
-npm view dsh-ulw-plan version
-gh release create v0.1.1 --generate-notes --verify-tag
-```
+workflow 会校验 tag 与 `package.json.version`、跑 `node --test`，然后直接发布；若 `NPM_TOKEN` 存在会先试 token，失败后自动回退 Trusted Publisher（OIDC）。
 
 查看/重跑 workflow：
 
@@ -204,10 +178,20 @@ gh run list --workflow release.yml --repo beiyanpiki/dsh-ulw-plan
 gh workflow run release.yml --repo beiyanpiki/dsh-ulw-plan
 ```
 
-**想要完全自动发布**（无人工批准）有两种升级路径：
+发布后核对：
 
-1. 创建一个 **granular access token，勾选 “Bypass two-factor authentication (2FA)”**，把 `NPM_TOKEN` 换成它，并把 workflow 的 `npm stage publish` 改回 `npm publish --access public --provenance`。
-2. 更推荐：包第一次上线后，在 npmjs.com → 包 → Settings → **Trusted publishing** 添加 GitHub 发布者（repo `beiyanpiki/dsh-ulw-plan`，workflow `release.yml`，允许 direct publish），然后删除 `NPM_TOKEN` 凭据，把 workflow 改回 `npm publish`；npm CLI 会自动使用 GitHub OIDC，不再需要长期 token。
+```bash
+npm view dsh-ulw-plan version
+gh release create v0.1.1 --generate-notes --verify-tag
+```
+
+仍然需要人工控制上线时，可以手动走 staged publishing（CI 默认不再走这条路）：
+
+```bash
+npm stage publish --access public --provenance
+npm stage list dsh-ulw-plan
+npm stage approve <stage-id> --otp <6位码>
+```
 
 ### 3.2 手动发布（备用）
 
@@ -327,4 +311,4 @@ dsh-market 的目录来自社区仓库 **awesome-dsh-plugin**，不是 dsh-marke
 
 > 历史：项目更早的一次演练记录用的是旧包名 `dsh-omo` 与旧评审面，只作对照，不要据此复现；现行清单与命令以上文和 README 为准。
 
-复现这条演练不需要 npm 账号；`npm publish` 才需要 `NPM_TOKEN` / `npm login`。
+复现这条演练不需要 npm 账号；`npm publish` 才需要发布凭据（Trusted Publisher OIDC 或 `NPM_TOKEN`）。
