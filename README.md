@@ -26,7 +26,7 @@ plugin_manager { "action": "install_bundle", "target": "dsh-ulw-plan" }
 plugin_manager { "action": "set_bundle", "target": "dsh-ulw-plan", "enabled": true }
 ```
 
-也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-ulw-plan-0.1.0.tgz`、`github:<owner>/dsh-ulw-plan#<ref>` 或（开发时）本仓库的检出目录。
+也可以从 tarball、GitHub 或本地目录安装：把 `target` 换成 `/绝对路径/dsh-ulw-plan-0.1.1.tgz`、`github:<owner>/dsh-ulw-plan#<ref>` 或（开发时）本仓库的检出目录。
 
 安装后 profile 的 `package.json` 会把 `dsh-ulw-plan` 放进 `dsh.profile.bundles`，包内 `cordis.patch.yml` 的 `insert` 行把 `dsh-ulw-plan` 挂到 Host 平面。**不要手工维护这两处**：依赖/bundle 列表和 bundle 的 `insert` 行由 `plugin_manager` 管理；但 profile 的 `cordis.patch.yml` 是受支持的**用户覆盖层**，用它按 row id（`omo`）覆盖插件配置（例如下面「配置」一节的 `review` 块）。也不要在 profile 目录跑 `pnpm`。
 

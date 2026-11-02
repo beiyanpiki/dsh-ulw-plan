@@ -120,7 +120,7 @@ function documentedExample(readme) {
 
 test('published metadata keeps the package identity and the Host bundle row', () => {
   assert.equal(pkg.name, 'dsh-ulw-plan')
-  assert.equal(pkg.version, '0.1.0')
+  assert.equal(pkg.version, '0.1.1')
   assert.equal(pkg.license, 'MIT')
   assert.equal(pkg.type, 'module')
   assert.equal(pkg.private, undefined)
